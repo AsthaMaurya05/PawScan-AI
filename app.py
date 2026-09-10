@@ -1,20 +1,16 @@
 """
 app.py — PawScan AI Streamlit Web Application
 ================================================
-The main web app that ties together:
-  - Disease detection (predict.py)
-  - Health scoring (health_score.py)
-  - LLM care recommendations (llm_advisor.py)
-  - Downloadable report generation
+Features:
+  - Disease detection (EfficientNet-B0)
+  - Health score engine (0-100)
+  - LLM care recommendations (Groq Llama 3.3 70B)
+  - Session state management (results persist across page navigation)
+  - Clickable scan history (view past scan details)
+  - Downloadable reports (HTML + Text)
 
 Run locally:
     streamlit run app.py
-
-Deploy free on Streamlit Community Cloud:
-    1. Push code to GitHub
-    2. Go to share.streamlit.io
-    3. Connect your repo and deploy
-    4. Add GROQ_API_KEY in App Settings → Secrets
 """
 
 import os
@@ -54,9 +50,23 @@ SYMPTOM_OPTIONS = [
 ]
 
 
-# ─── API KEY: auto-load from Streamlit Secrets ───────────────
+# ─── SESSION STATE INITIALIZATION ────────────────────────────
+def init_session_state():
+    """Initialize session state variables for persisting scan results."""
+    if "current_scan" not in st.session_state:
+        st.session_state.current_scan = None  # Stores full scan data
+    if "viewing_history_scan" not in st.session_state:
+        st.session_state.viewing_history_scan = None  # When viewing a past scan
+
+
+def clear_current_scan():
+    """Clear the current scan results."""
+    st.session_state.current_scan = None
+    st.session_state.viewing_history_scan = None
+
+
+# ─── API KEY ─────────────────────────────────────────────────
 def get_api_key():
-    """Get Groq API key from secrets, env, or manual input."""
     try:
         if "GROQ_API_KEY" in st.secrets:
             return st.secrets["GROQ_API_KEY"]
@@ -101,6 +111,22 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
+def save_history_with_image(history_entry, image):
+    """Save scan to history with embedded image (base64)."""
+    history = load_history()
+
+    # Convert image to base64 thumbnail
+    img_thumb = image.copy()
+    img_thumb.thumbnail((200, 200))
+    img_buffer = BytesIO()
+    img_thumb.save(img_buffer, format="JPEG", quality=70)
+    img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+
+    history_entry["image_b64"] = img_b64
+    history.append(history_entry)
+    save_history(history)
+
+
 # ─── VISUALIZATION FUNCTIONS ─────────────────────────────────
 def plot_health_gauge(score):
     if score >= 80:
@@ -113,33 +139,25 @@ def plot_health_gauge(score):
         color = "#e74c3c"
 
     fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=score,
+        mode="gauge+number", value=score,
         domain={'x': [0, 1], 'y': [0, 1]},
         title={'text': "Health Score", 'font': {'size': 20}},
         number={'font': {'size': 48, 'color': color}},
         gauge={
             'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "white"},
-            'bar': {'color': color},
-            'bgcolor': "rgba(0,0,0,0)",
-            'borderwidth': 2,
-            'bordercolor': "#333",
+            'bar': {'color': color}, 'bgcolor': "rgba(0,0,0,0)",
+            'borderwidth': 2, 'bordercolor': "#333",
             'steps': [
                 {'range': [0, 40], 'color': '#ffeaa7'},
                 {'range': [40, 60], 'color': '#fab1a0'},
                 {'range': [60, 80], 'color': '#81ecec'},
                 {'range': [80, 100], 'color': '#55efc4'},
             ],
-            'threshold': {
-                'line': {'color': color, 'width': 4},
-                'thickness': 0.75,
-                'value': score
-            }
+            'threshold': {'line': {'color': color, 'width': 4}, 'thickness': 0.75, 'value': score}
         }
     ))
     fig.update_layout(height=280, margin=dict(l=20, r=20, t=50, b=20),
-                      paper_bgcolor="rgba(0,0,0,0)",
-                      font={'color': "#333", 'family': "Arial"})
+                      paper_bgcolor="rgba(0,0,0,0)", font={'color': "#333", 'family': "Arial"})
     return fig
 
 
@@ -152,8 +170,7 @@ def plot_probability_bars(probabilities, display_names=None):
         labels = classes
     sorted_data = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
     labels, values = zip(*sorted_data)
-    colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c']
-    colors = colors[:len(labels)]
+    colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c'][:len(labels)]
     fig, ax = plt.subplots(figsize=(8, 4))
     bars = ax.barh(labels, values, color=colors)
     ax.set_xlabel('Probability (%)', fontsize=11)
@@ -173,53 +190,170 @@ def plot_score_breakdown(breakdown):
     values = list(components.values())
     colors = ['#3498db', '#e74c3c', '#f39c12']
     fig, ax = plt.subplots(figsize=(6, 6))
-    wedges, texts, autotexts = ax.pie(
-        values, labels=labels, colors=colors,
-        autopct='%1.0f%%', startangle=90,
-        textprops={'fontsize': 10}
-    )
+    ax.pie(values, labels=labels, colors=colors, autopct='%1.0f%%', startangle=90, textprops={'fontsize': 10})
     ax.set_title('Health Score Breakdown', fontsize=13)
     plt.tight_layout()
     return fig
+
+
+# ─── DISPLAY SCAN RESULTS (reusable for current + history scans) ──
+def display_scan_results(scan_data, disease_info, predictor, show_download=True):
+    """Display full scan results. Used for both current scans and history scans."""
+    image = scan_data["image"]
+    result = scan_data["result"]
+    score = scan_data["score"]
+    breakdown = scan_data["breakdown"]
+    care_plan = scan_data["care_plan"]
+    pet_info = scan_data["pet_info"]
+
+    st.markdown("## 📊 Scan Results")
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    with col1:
+        st.markdown("#### 📸 Photo")
+        st.image(image, use_container_width=True)
+
+    with col2:
+        st.markdown("#### 💯 Health Score")
+        gauge_fig = plot_health_gauge(score)
+        st.plotly_chart(gauge_fig, use_container_width=True)
+        status_level = breakdown["status_level"]
+        if status_level == "good":
+            st.success(breakdown["status"])
+        elif status_level == "moderate":
+            st.warning(breakdown["status"])
+        elif status_level == "concerning":
+            st.warning(breakdown["status"])
+        else:
+            st.error(breakdown["status"])
+
+    with col3:
+        st.markdown("#### 🎯 Detection")
+        st.metric("Condition", result["display_name"])
+        st.metric("Confidence", f"{result['confidence_pct']:.1f}%")
+        st.metric("Severity", result["severity"].title())
+
+    # Probability chart
+    st.markdown("---")
+    st.markdown("### AI Detection — All Conditions")
+    prob_fig = plot_probability_bars(result["all_probabilities"], predictor.display_names)
+    st.pyplot(prob_fig)
+
+    # Score breakdown
+    col_score, col_breakdown = st.columns([1, 1])
+
+    with col_score:
+        st.markdown("### Score Breakdown")
+        pie_fig = plot_score_breakdown(breakdown)
+        st.pyplot(pie_fig)
+
+    with col_breakdown:
+        st.markdown("### Score Components")
+        for component, points in breakdown["components"].items():
+            max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
+            st.markdown(f"**{component}:** {points:.0f} / {max_pts} pts")
+        st.markdown("")
+        st.info(f"📋 **Disease Detection:** {breakdown['disease_note']}")
+        st.info(f"🩺 **Symptoms:** {breakdown['symptom_note']}")
+        st.info(f"📊 **Metadata:** {breakdown['metadata_note']}")
+
+    # Care plan
+    st.markdown("---")
+    st.markdown("### 🩺 Care Plan")
+
+    triage = care_plan.get("triage", "ROUTINE")
+    triage_colors = {"URGENT": "🔴", "NON-URGENT": "🟡", "ROUTINE": "🟢"}
+    st.markdown(f"### {triage_colors.get(triage, '🟢')} Triage: {triage}")
+    st.markdown(f"**Summary:** {care_plan.get('summary', '')}")
+
+    col_steps, col_care = st.columns([1, 1])
+
+    with col_steps:
+        st.markdown("#### ✅ Recommended Next Steps")
+        for step in care_plan.get("next_steps", []):
+            st.markdown(f"- {step}")
+
+    with col_care:
+        st.markdown("#### 🏠 Home Care Tips")
+        for tip in care_plan.get("home_care", []):
+            st.markdown(f"- {tip}")
+
+    st.markdown("#### ⚠️ Watch For")
+    for item in care_plan.get("watch_for", []):
+        st.markdown(f"- {item}")
+
+    # Disease info
+    disease_key = result["predicted_class"]
+    if disease_key in disease_info:
+        info = disease_info[disease_key]
+        with st.expander("📖 Disease Information"):
+            st.markdown(f"**Description:** {info.get('description', 'N/A')}")
+            st.markdown(f"**Treatment:** {info.get('treatment_approach', 'N/A')}")
+            st.markdown(f"**Contagious to humans:** {'Yes ⚠️' if info.get('contagious_to_humans') else 'No'}")
+            if info.get("common_symptoms"):
+                st.markdown(f"**Common symptoms:** {', '.join(info['common_symptoms'])}")
+
+    # Disclaimer
+    st.markdown("---")
+    st.warning("⚠️ **Disclaimer:** " + care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian."))
+
+    # Download Report
+    if show_download:
+        st.markdown("---")
+        st.markdown("### 📄 Download Report")
+
+        html_report = generate_html_report(
+            image=image, result=result, score=score, breakdown=breakdown,
+            care_plan=care_plan, pet_name=pet_info.get("name", ""),
+            pet_species=pet_info.get("species", "Dog"), pet_breed=pet_info.get("breed", ""),
+            pet_age=pet_info.get("age", 3), pet_weight=pet_info.get("weight", 15),
+            symptoms=pet_info.get("symptoms", []), disease_info=disease_info
+        )
+
+        pet_name_clean = pet_info.get("name", "pet").replace(" ", "_") or "pet"
+        st.download_button(
+            label="📥 Download Full Report (HTML)",
+            data=html_report.encode("utf-8"),
+            file_name=f"pawscan_report_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+            mime="text/html", use_container_width=True
+        )
+
+        text_report = generate_text_report(
+            result=result, score=score, breakdown=breakdown, care_plan=care_plan,
+            pet_info=pet_info
+        )
+        st.download_button(
+            label="📝 Download Summary (Text)",
+            data=text_report.encode("utf-8"),
+            file_name=f"pawscan_summary_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain", use_container_width=True
+        )
+
+    if result["is_healthy"] and score >= 80:
+        st.balloons()
 
 
 # ─── REPORT GENERATION ───────────────────────────────────────
 def generate_html_report(image, result, score, breakdown, care_plan,
                          pet_name, pet_species, pet_breed, pet_age,
                          pet_weight, symptoms, disease_info):
-    """Generate a self-contained HTML report with all results."""
-
-    # Convert image to base64 for embedding
+    """Generate a self-contained HTML report."""
     img_buffer = BytesIO()
     image.save(img_buffer, format="PNG")
     img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
 
-    # Format symptoms
-    if not symptoms or "None" in symptoms:
-        symptoms_str = "No symptoms reported"
-    else:
-        symptoms_str = ", ".join(symptoms)
+    symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
 
-    # Triage color
     triage = care_plan.get("triage", "ROUTINE")
-    triage_colors = {
-        "URGENT": ("#e74c3c", "#fdf2f2"),
-        "NON-URGENT": ("#f39c12", "#fff9e6"),
-        "ROUTINE": ("#2ecc71", "#f0fff4")
-    }
-    triage_color, triage_bg = triage_colors.get(triage, ("#2ecc71", "#f0fff4"))
+    triage_colors_map = {"URGENT": ("#e74c3c", "#fdf2f2"), "NON-URGENT": ("#f39c12", "#fff9e6"), "ROUTINE": ("#2ecc71", "#f0fff4")}
+    triage_color, triage_bg = triage_colors_map.get(triage, ("#2ecc71", "#f0fff4"))
 
-    # Score color
-    if score >= 80:
-        score_color = "#2ecc71"
-    elif score >= 60:
-        score_color = "#f1c40f"
-    elif score >= 40:
-        score_color = "#e67e22"
-    else:
-        score_color = "#e74c3c"
+    if score >= 80: score_color = "#2ecc71"
+    elif score >= 60: score_color = "#f1c40f"
+    elif score >= 40: score_color = "#e67e22"
+    else: score_color = "#e74c3c"
 
-    # Build probability bars HTML
     prob_bars_html = ""
     sorted_probs = sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True)
     bar_colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c']
@@ -236,186 +370,182 @@ def generate_html_report(image, result, score, breakdown, care_plan,
             <div style="background: #f0f0f0; border-radius: 4px; height: 20px;">
                 <div style="background: {color}; border-radius: 4px; height: 20px; width: {pct}%;"></div>
             </div>
-        </div>
-        """
+        </div>"""
 
-    # Next steps HTML
     next_steps_html = "".join(f"<li>{step}</li>" for step in care_plan.get("next_steps", []))
     home_care_html = "".join(f"<li>{tip}</li>" for tip in care_plan.get("home_care", []))
     watch_for_html = "".join(f"<li>{item}</li>" for item in care_plan.get("watch_for", []))
 
-    # Disease info
     disease_key = result["predicted_class"]
-    disease_desc = ""
-    disease_treatment = ""
-    disease_contagious = ""
-    disease_symptoms = ""
+    disease_desc = disease_treatment = disease_contagious = disease_symptoms_str = ""
     if disease_key in disease_info:
         info = disease_info[disease_key]
         disease_desc = info.get("description", "N/A")
         disease_treatment = info.get("treatment_approach", "N/A")
         disease_contagious = "Yes" if info.get("contagious_to_humans") else "No"
-        disease_symptoms = ", ".join(info.get("common_symptoms", []))
+        disease_symptoms_str = ", ".join(info.get("common_symptoms", []))
 
-    # Score components
     components_html = ""
     for component, points in breakdown["components"].items():
         max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
-        components_html += f"""
-        <tr>
-            <td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td>
-        </tr>
-        """
+        components_html += f"""<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td></tr>"""
 
     report_datetime = datetime.now().strftime("%Y-%m-%d at %H:%M")
 
-    html = f"""<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PawScan AI — Health Report for {pet_name or "Pet"}</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; color: #333; }}
-        .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }}
-        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }}
-        .header h1 {{ margin: 0; font-size: 28px; }}
-        .header p {{ margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; }}
-        .section {{ padding: 25px 30px; border-bottom: 1px solid #f0f0f0; }}
-        .section h2 {{ font-size: 18px; color: #2c3e50; margin: 0 0 15px 0; border-left: 4px solid #667eea; padding-left: 10px; }}
-        .pet-info {{ display: flex; flex-wrap: wrap; gap: 15px; }}
-        .pet-info-item {{ flex: 1; min-width: 120px; }}
-        .pet-info-label {{ font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .pet-info-value {{ font-size: 16px; font-weight: 600; margin-top: 2px; }}
-        .result-grid {{ display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }}
-        .result-photo {{ flex: 0 0 300px; }}
-        .result-photo img {{ width: 100%; border-radius: 8px; }}
-        .result-details {{ flex: 1; min-width: 250px; }}
-        .score-circle {{ width: 120px; height: 120px; border-radius: 50%; border: 8px solid {score_color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px auto; }}
-        .score-number {{ font-size: 36px; font-weight: bold; color: {score_color}; }}
-        .score-label {{ text-align: center; font-size: 14px; color: #666; }}
-        .triage-badge {{ display: inline-block; padding: 6px 20px; border-radius: 20px; font-size: 14px; font-weight: bold; color: white; background: {triage_color}; margin-bottom: 10px; }}
-        .condition-name {{ font-size: 22px; font-weight: bold; margin: 5px 0; }}
-        .confidence {{ font-size: 14px; color: #666; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th {{ text-align: left; padding: 8px; background: #f8f9fa; border-bottom: 2px solid #ddd; font-size: 13px; }}
-        ul {{ margin: 8px 0; padding-left: 20px; }}
-        li {{ margin-bottom: 6px; font-size: 14px; }}
-        .disclaimer {{ background: #fff3cd; padding: 15px 30px; font-size: 12px; color: #856404; }}
-        .footer {{ padding: 20px 30px; text-align: center; font-size: 12px; color: #999; }}
-    </style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PawScan AI — Health Report for {pet_name or "Pet"}</title>
+<style>
+body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; color: #333; }}
+.container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }}
+.header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }}
+.header h1 {{ margin: 0; font-size: 28px; }} .header p {{ margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; }}
+.section {{ padding: 25px 30px; border-bottom: 1px solid #f0f0f0; }}
+.section h2 {{ font-size: 18px; color: #2c3e50; margin: 0 0 15px 0; border-left: 4px solid #667eea; padding-left: 10px; }}
+.pet-info {{ display: flex; flex-wrap: wrap; gap: 15px; }}
+.pet-info-item {{ flex: 1; min-width: 120px; }}
+.pet-info-label {{ font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }}
+.pet-info-value {{ font-size: 16px; font-weight: 600; margin-top: 2px; }}
+.result-grid {{ display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }}
+.result-photo {{ flex: 0 0 300px; }} .result-photo img {{ width: 100%; border-radius: 8px; }}
+.result-details {{ flex: 1; min-width: 250px; }}
+.score-circle {{ width: 120px; height: 120px; border-radius: 50%; border: 8px solid {score_color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px auto; }}
+.score-number {{ font-size: 36px; font-weight: bold; color: {score_color}; }}
+.score-label {{ text-align: center; font-size: 14px; color: #666; }}
+.triage-badge {{ display: inline-block; padding: 6px 20px; border-radius: 20px; font-size: 14px; font-weight: bold; color: white; background: {triage_color}; margin-bottom: 10px; }}
+.condition-name {{ font-size: 22px; font-weight: bold; margin: 5px 0; }}
+.confidence {{ font-size: 14px; color: #666; }}
+table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+th {{ text-align: left; padding: 8px; background: #f8f9fa; border-bottom: 2px solid #ddd; font-size: 13px; }}
+ul {{ margin: 8px 0; padding-left: 20px; }} li {{ margin-bottom: 6px; font-size: 14px; }}
+.disclaimer {{ background: #fff3cd; padding: 15px 30px; font-size: 12px; color: #856404; }}
+.footer {{ padding: 20px 30px; text-align: center; font-size: 12px; color: #999; }}
+</style>
 </head>
-<body>
-<div class="container">
-
-    <div class="header">
-        <h1>PawScan AI — Health Report</h1>
-        <p>Generated on {report_datetime}</p>
-    </div>
-
-    <div class="section">
-        <h2>Pet Information</h2>
-        <div class="pet-info">
-            <div class="pet-info-item"><div class="pet-info-label">Name</div><div class="pet-info-value">{pet_name or "Unnamed"}</div></div>
-            <div class="pet-info-item"><div class="pet-info-label">Species</div><div class="pet-info-value">{pet_species}</div></div>
-            <div class="pet-info-item"><div class="pet-info-label">Breed</div><div class="pet-info-value">{pet_breed or "Unknown"}</div></div>
-            <div class="pet-info-item"><div class="pet-info-label">Age</div><div class="pet-info-value">{pet_age} years</div></div>
-            <div class="pet-info-item"><div class="pet-info-label">Weight</div><div class="pet-info-value">{pet_weight} kg</div></div>
-            <div class="pet-info-item"><div class="pet-info-label">Symptoms</div><div class="pet-info-value">{symptoms_str}</div></div>
-        </div>
-    </div>
-
-    <div class="section">
-        <h2>Scan Results</h2>
-        <div class="result-grid">
-            <div class="result-photo">
-                <img src="data:image/png;base64,{img_b64}" alt="Pet Photo">
-            </div>
-            <div class="result-details">
-                <div class="score-circle">
-                    <div class="score-number">{score}</div>
-                </div>
-                <div class="score-label">Health Score (out of 100)</div>
-                <div style="margin-top: 15px;">
-                    <div class="triage-badge">{triage}</div>
-                    <div class="condition-name">{result["display_name"]}</div>
-                    <div class="confidence">Confidence: {result["confidence_pct"]:.1f}% | Severity: {result["severity"].title()}</div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="section">
-        <h2>AI Detection — All Conditions</h2>
-        {prob_bars_html}
-    </div>
-
-    <div class="section">
-        <h2>Health Score Breakdown</h2>
-        <table>
-            <thead>
-                <tr><th>Component</th><th style="text-align: right;">Score</th></tr>
-            </thead>
-            <tbody>
-                {components_html}
-                <tr style="background: #f8f9fa; font-weight: bold;">
-                    <td style="padding: 10px;">Total Health Score</td>
-                    <td style="padding: 10px; text-align: right; font-size: 18px; color: {score_color};">{score} / 100</td>
-                </tr>
-            </tbody>
-        </table>
-        <div style="margin-top: 10px; font-size: 13px; color: #666;">
-            <p><strong>Disease Detection:</strong> {breakdown["disease_note"]}</p>
-            <p><strong>Symptoms:</strong> {breakdown["symptom_note"]}</p>
-            <p><strong>Metadata:</strong> {breakdown["metadata_note"]}</p>
-        </div>
-    </div>
-
-    <div class="section">
-        <h2>Care Plan</h2>
-        <div class="triage-badge">{triage}</div>
-        <p style="font-size: 15px; margin: 10px 0;">{care_plan.get("summary", "")}</p>
-        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Recommended Next Steps</h3>
-        <ul>{next_steps_html}</ul>
-        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Home Care Tips</h3>
-        <ul>{home_care_html}</ul>
-        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Watch For</h3>
-        <ul>{watch_for_html}</ul>
-    </div>
-"""
-
-    if disease_desc:
-        html += f"""
-    <div class="section">
-        <h2>Disease Information</h2>
-        <p style="font-size: 14px;"><strong>Condition:</strong> {result["display_name"]}</p>
-        <p style="font-size: 14px;"><strong>Description:</strong> {disease_desc}</p>
-        <p style="font-size: 14px;"><strong>Treatment:</strong> {disease_treatment}</p>
-        <p style="font-size: 14px;"><strong>Common symptoms:</strong> {disease_symptoms}</p>
-        <p style="font-size: 14px;"><strong>Contagious to humans:</strong> {disease_contagious}</p>
-    </div>
-"""
-
-    html += f"""
-    <div class="disclaimer">
-        <strong>Disclaimer:</strong> {care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}
-    </div>
-
-    <div class="footer">
-        PawScan AI — AI-Powered Pet Health Assessment<br>
-        Report generated on {report_datetime} | Powered by EfficientNet-B0 + Llama 3.3 70B
-    </div>
-
+<body><div class="container">
+<div class="header"><h1>🐾 PawScan AI — Health Report</h1><p>Generated on {report_datetime}</p></div>
+<div class="section"><h2>Pet Information</h2><div class="pet-info">
+<div class="pet-info-item"><div class="pet-info-label">Name</div><div class="pet-info-value">{pet_name or "Unnamed"}</div></div>
+<div class="pet-info-item"><div class="pet-info-label">Species</div><div class="pet-info-value">{pet_species}</div></div>
+<div class="pet-info-item"><div class="pet-info-label">Breed</div><div class="pet-info-value">{pet_breed or "Unknown"}</div></div>
+<div class="pet-info-item"><div class="pet-info-label">Age</div><div class="pet-info-value">{pet_age} years</div></div>
+<div class="pet-info-item"><div class="pet-info-label">Weight</div><div class="pet-info-value">{pet_weight} kg</div></div>
+<div class="pet-info-item"><div class="pet-info-label">Symptoms</div><div class="pet-info-value">{symptoms_str}</div></div>
+</div></div>
+<div class="section"><h2>Scan Results</h2><div class="result-grid">
+<div class="result-photo"><img src="data:image/png;base64,{img_b64}" alt="Pet Photo"></div>
+<div class="result-details">
+<div class="score-circle"><div class="score-number">{score}</div></div>
+<div class="score-label">Health Score (out of 100)</div>
+<div style="margin-top: 15px;"><div class="triage-badge">{triage}</div>
+<div class="condition-name">{result["display_name"]}</div>
+<div class="confidence">Confidence: {result["confidence_pct"]:.1f}% | Severity: {result["severity"].title()}</div></div>
+</div></div></div>
+<div class="section"><h2>AI Detection — All Conditions</h2>{prob_bars_html}</div>
+<div class="section"><h2>Health Score Breakdown</h2>
+<table><thead><tr><th>Component</th><th style="text-align: right;">Score</th></tr></thead><tbody>
+{components_html}
+<tr style="background: #f8f9fa; font-weight: bold;"><td style="padding: 10px;">Total Health Score</td><td style="padding: 10px; text-align: right; font-size: 18px; color: {score_color};">{score} / 100</td></tr>
+</tbody></table>
+<div style="margin-top: 10px; font-size: 13px; color: #666;">
+<p><strong>Disease Detection:</strong> {breakdown["disease_note"]}</p>
+<p><strong>Symptoms:</strong> {breakdown["symptom_note"]}</p>
+<p><strong>Metadata:</strong> {breakdown["metadata_note"]}</p>
+</div></div>
+<div class="section"><h2>Care Plan</h2><div class="triage-badge">{triage}</div>
+<p style="font-size: 15px; margin: 10px 0;">{care_plan.get("summary", "")}</p>
+<h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Recommended Next Steps</h3><ul>{next_steps_html}</ul>
+<h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Home Care Tips</h3><ul>{home_care_html}</ul>
+<h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Watch For</h3><ul>{watch_for_html}</ul>
 </div>
-</body>
-</html>"""
+""" + (f"""<div class="section"><h2>Disease Information</h2>
+<p style="font-size: 14px;"><strong>Condition:</strong> {result["display_name"]}</p>
+<p style="font-size: 14px;"><strong>Description:</strong> {disease_desc}</p>
+<p style="font-size: 14px;"><strong>Treatment:</strong> {disease_treatment}</p>
+<p style="font-size: 14px;"><strong>Common symptoms:</strong> {disease_symptoms_str}</p>
+<p style="font-size: 14px;"><strong>Contagious to humans:</strong> {disease_contagious}</p>
+</div>""" if disease_desc else "") + f"""
+<div class="disclaimer"><strong>Disclaimer:</strong> {care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}</div>
+<div class="footer">PawScan AI — AI-Powered Pet Health Assessment<br>Report generated on {report_datetime} | Powered by EfficientNet-B0 + Llama 3.3 70B</div>
+</div></body></html>"""
 
-    return html
+
+def generate_text_report(result, score, breakdown, care_plan, pet_info):
+    """Generate a plain text report."""
+    symptoms = pet_info.get("symptoms", [])
+    symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
+    triage = care_plan.get("triage", "ROUTINE")
+
+    report = f"""PAWSCAN AI — PET HEALTH REPORT
+================================
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+PET INFORMATION
+----------------
+Name: {pet_info.get("name", "Unnamed")}
+Species: {pet_info.get("species", "Dog")}
+Breed: {pet_info.get("breed", "Unknown")}
+Age: {pet_info.get("age", "Unknown")} years
+Weight: {pet_info.get("weight", "Unknown")} kg
+Symptoms: {symptoms_str}
+
+SCAN RESULTS
+------------
+Detected Condition: {result["display_name"]}
+Confidence: {result["confidence_pct"]:.1f}%
+Severity: {result["severity"].title()}
+Health Score: {score}/100
+
+ALL CONDITION PROBABILITIES
+---------------------------
+"""
+    for cls, prob in sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True):
+        report += f"{cls}: {prob*100:.1f}%\n"
+
+    report += f"""
+HEALTH SCORE BREAKDOWN
+----------------------
+Disease Detection (60%): {breakdown["components"]["Disease Detection (60%)"]:.0f}/60
+Reported Symptoms (20%): {breakdown["components"]["Reported Symptoms (20%)"]:.0f}/20
+Pet Metadata (20%): {breakdown["components"]["Pet Metadata (20%)"]:.0f}/20
+Total: {score}/100
+
+{breakdown["disease_note"]}
+{breakdown["symptom_note"]}
+{breakdown["metadata_note"]}
+
+CARE PLAN
+---------
+Triage: {triage}
+Summary: {care_plan.get("summary", "")}
+
+Recommended Next Steps:
+"""
+    for step in care_plan.get("next_steps", []):
+        report += f"  - {step}\n"
+    report += "\nHome Care Tips:\n"
+    for tip in care_plan.get("home_care", []):
+        report += f"  - {tip}\n"
+    report += "\nWatch For:\n"
+    for item in care_plan.get("watch_for", []):
+        report += f"  - {item}\n"
+    report += f"""
+DISCLAIMER
+----------
+{care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}
+
+---
+PawScan AI — Powered by EfficientNet-B0 + Llama 3.3 70B
+"""
+    return report
 
 
 # ─── MAIN APP ────────────────────────────────────────────────
 def main():
+    init_session_state()
+
     st.markdown("""
     <div style='text-align: center; padding: 10px 0 20px 0;'>
         <h1 style='font-size: 2.5em; margin-bottom: 5px;'>🐾 PawScan AI</h1>
@@ -450,8 +580,45 @@ def main():
 
     # ─── NEW SCAN PAGE ───────────────────────────────────────
     if page == "🔍 New Scan":
+
+        # ── Check if viewing a history scan ──
+        if st.session_state.viewing_history_scan is not None:
+            scan_data = st.session_state.viewing_history_scan
+            display_scan_results(scan_data, disease_info, predictor, show_download=True)
+
+            st.markdown("---")
+            col_back1, col_back2, col_back3 = st.columns([1, 2, 1])
+            with col_back2:
+                if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
+                    st.session_state.viewing_history_scan = None
+                    st.rerun()
+            return
+
+        # ── If we have a current scan, show it ──
+        if st.session_state.current_scan is not None:
+            scan_data = st.session_state.current_scan
+            display_scan_results(scan_data, disease_info, predictor, show_download=True)
+
+            st.markdown("---")
+            col_new1, col_new2, col_new3 = st.columns([1, 2, 1])
+            with col_new2:
+                if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
+                    clear_current_scan()
+                    st.rerun()
+            return
+
+        # ── Upload + Scan form ──
         st.markdown("### Upload a Photo of Your Pet")
         st.markdown("Take or upload a clear photo of your pet's skin area. The AI will analyze it for common skin conditions.")
+
+        # Photo guidance
+        st.info(
+            "📸 **Photo Tips for Best Results:**\n"
+            "- Take a **close-up** of the affected skin area (not a full body shot)\n"
+            "- Ensure **good lighting** (natural daylight is best)\n"
+            "- The affected area should **fill most of the frame**\n"
+            "- Avoid blurry or dark photos"
+        )
 
         col_upload, col_info = st.columns([1, 1])
 
@@ -459,7 +626,7 @@ def main():
             uploaded_file = st.file_uploader(
                 "Choose an image...",
                 type=['jpg', 'jpeg', 'png'],
-                help="JPG or PNG. Best results with close-up, well-lit photos."
+                help="JPG or PNG. Best results with close-up, well-lit photos of the skin area."
             )
             if uploaded_file:
                 image = Image.open(uploaded_file)
@@ -469,10 +636,7 @@ def main():
             st.markdown("#### Reported Symptoms")
             st.markdown("Select any symptoms you've noticed:")
             symptoms = st.multiselect(
-                "Symptoms",
-                SYMPTOM_OPTIONS,
-                default=["None"],
-                label_visibility="collapsed"
+                "Symptoms", SYMPTOM_OPTIONS, default=["None"], label_visibility="collapsed"
             )
             if "None" in symptoms and len(symptoms) > 1:
                 symptoms = [s for s in symptoms if s != "None"]
@@ -503,285 +667,129 @@ def main():
                     result = predictor.predict(image)
 
                     score, breakdown = calculate_health_score(
-                        prediction_result=result,
-                        pet_species=pet_species,
-                        pet_age=pet_age,
-                        pet_weight=pet_weight,
-                        symptoms=symptoms
+                        prediction_result=result, pet_species=pet_species,
+                        pet_age=pet_age, pet_weight=pet_weight, symptoms=symptoms
                     )
 
                     care_plan = generate_care_plan(
-                        prediction=result,
-                        pet_species=pet_species,
-                        pet_breed=pet_breed or "Unknown",
-                        pet_age=pet_age,
-                        pet_weight=pet_weight,
-                        symptoms=symptoms,
+                        prediction=result, pet_species=pet_species,
+                        pet_breed=pet_breed or "Unknown", pet_age=pet_age,
+                        pet_weight=pet_weight, symptoms=symptoms,
                         api_key=api_key if 'api_key' in locals() else auto_api_key
                     )
 
-                # ─── RESULTS ───────────────────────────────────
-                st.markdown("---")
-                st.markdown("## 📊 Scan Results")
+                    # Store in session state
+                    st.session_state.current_scan = {
+                        "image": image,
+                        "result": result,
+                        "score": score,
+                        "breakdown": breakdown,
+                        "care_plan": care_plan,
+                        "pet_info": {
+                            "name": pet_name, "species": pet_species, "breed": pet_breed,
+                            "age": pet_age, "weight": pet_weight, "symptoms": symptoms
+                        },
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                    }
 
-                # Save to history
-                history = load_history()
-                history_entry = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "pet_name": pet_name or "Unnamed",
-                    "species": pet_species,
-                    "predicted_class": result["predicted_class"],
-                    "display_name": result["display_name"],
-                    "confidence": result["confidence_pct"],
-                    "health_score": score,
-                    "severity": result["severity"]
-                }
-                history.append(history_entry)
-                save_history(history)
+                    # Save to history with image
+                    history_entry = {
+                        "timestamp": st.session_state.current_scan["timestamp"],
+                        "pet_name": pet_name or "Unnamed",
+                        "species": pet_species,
+                        "predicted_class": result["predicted_class"],
+                        "display_name": result["display_name"],
+                        "confidence": result["confidence_pct"],
+                        "health_score": score,
+                        "severity": result["severity"],
+                        "symptoms": symptoms,
+                        "result": result,
+                        "score": score,
+                        "breakdown": breakdown,
+                        "care_plan": care_plan,
+                        "pet_info": {
+                            "name": pet_name, "species": pet_species, "breed": pet_breed,
+                            "age": pet_age, "weight": pet_weight, "symptoms": symptoms
+                        }
+                    }
+                    save_history_with_image(history_entry, image)
 
-                col1, col2, col3 = st.columns([1, 1, 1])
-
-                with col1:
-                    st.markdown("#### 📸 Photo")
-                    st.image(image, use_container_width=True)
-
-                with col2:
-                    st.markdown("#### 💯 Health Score")
-                    gauge_fig = plot_health_gauge(score)
-                    st.plotly_chart(gauge_fig, use_container_width=True)
-                    status_level = breakdown["status_level"]
-                    if status_level == "good":
-                        st.success(breakdown["status"])
-                    elif status_level == "moderate":
-                        st.warning(breakdown["status"])
-                    elif status_level == "concerning":
-                        st.warning(breakdown["status"])
-                    else:
-                        st.error(breakdown["status"])
-
-                with col3:
-                    st.markdown("#### 🎯 Detection")
-                    st.metric("Condition", result["display_name"])
-                    st.metric("Confidence", f"{result['confidence_pct']:.1f}%")
-                    st.metric("Severity", result["severity"].title())
-
-                # Probability chart
-                st.markdown("---")
-                st.markdown("### AI Detection — All Conditions")
-                prob_fig = plot_probability_bars(result["all_probabilities"], predictor.display_names)
-                st.pyplot(prob_fig)
-
-                # Score breakdown
-                col_score, col_breakdown = st.columns([1, 1])
-
-                with col_score:
-                    st.markdown("### Score Breakdown")
-                    pie_fig = plot_score_breakdown(breakdown)
-                    st.pyplot(pie_fig)
-
-                with col_breakdown:
-                    st.markdown("### Score Components")
-                    for component, points in breakdown["components"].items():
-                        max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
-                        st.markdown(f"**{component}:** {points:.0f} / {max_pts} pts")
-                    st.markdown("")
-                    st.info(f"📋 **Disease Detection:** {breakdown['disease_note']}")
-                    st.info(f"🩺 **Symptoms:** {breakdown['symptom_note']}")
-                    st.info(f"📊 **Metadata:** {breakdown['metadata_note']}")
-
-                # Care plan
-                st.markdown("---")
-                st.markdown("### 🩺 Care Plan")
-
-                triage = care_plan.get("triage", "ROUTINE")
-                triage_colors = {"URGENT": "🔴", "NON-URGENT": "🟡", "ROUTINE": "🟢"}
-                st.markdown(f"### {triage_colors.get(triage, '🟢')} Triage: {triage}")
-                st.markdown(f"**Summary:** {care_plan.get('summary', '')}")
-
-                col_steps, col_care = st.columns([1, 1])
-
-                with col_steps:
-                    st.markdown("#### ✅ Recommended Next Steps")
-                    for step in care_plan.get("next_steps", []):
-                        st.markdown(f"- {step}")
-
-                with col_care:
-                    st.markdown("#### 🏠 Home Care Tips")
-                    for tip in care_plan.get("home_care", []):
-                        st.markdown(f"- {tip}")
-
-                st.markdown("#### ⚠️ Watch For")
-                for item in care_plan.get("watch_for", []):
-                    st.markdown(f"- {item}")
-
-                # Disease info
-                disease_key = result["predicted_class"]
-                if disease_key in disease_info:
-                    info = disease_info[disease_key]
-                    with st.expander("📖 Disease Information"):
-                        st.markdown(f"**Description:** {info.get('description', 'N/A')}")
-                        st.markdown(f"**Treatment:** {info.get('treatment_approach', 'N/A')}")
-                        st.markdown(f"**Contagious to humans:** {'Yes ⚠️' if info.get('contagious_to_humans') else 'No'}")
-                        if info.get("common_symptoms"):
-                            st.markdown(f"**Common symptoms:** {', '.join(info['common_symptoms'])}")
-
-                # Disclaimer
-                st.markdown("---")
-                st.warning("⚠️ **Disclaimer:** " + care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian."))
-
-                # ─── DOWNLOAD REPORT BUTTON ─────────────────────
-                st.markdown("---")
-                st.markdown("### 📄 Download Report")
-
-                # Generate HTML report
-                html_report = generate_html_report(
-                    image=image,
-                    result=result,
-                    score=score,
-                    breakdown=breakdown,
-                    care_plan=care_plan,
-                    pet_name=pet_name,
-                    pet_species=pet_species,
-                    pet_breed=pet_breed,
-                    pet_age=pet_age,
-                    pet_weight=pet_weight,
-                    symptoms=symptoms,
-                    disease_info=disease_info
-                )
-
-                # Download button for HTML report
-                st.download_button(
-                    label="📥 Download Full Report (HTML)",
-                    data=html_report.encode("utf-8"),
-                    file_name=f"pawscan_report_{pet_name or 'pet'}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                    mime="text/html",
-                    use_container_width=True
-                )
-
-                # Also offer a text summary
-                text_report = f"""PAWSCAN AI — PET HEALTH REPORT
-================================
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
-
-PET INFORMATION
-----------------
-Name: {pet_name or "Unnamed"}
-Species: {pet_species}
-Breed: {pet_breed or "Unknown"}
-Age: {pet_age} years
-Weight: {pet_weight} kg
-Symptoms: {", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"}
-
-SCAN RESULTS
-------------
-Detected Condition: {result["display_name"]}
-Confidence: {result["confidence_pct"]:.1f}%
-Severity: {result["severity"].title()}
-Health Score: {score}/100
-
-ALL CONDITION PROBABILITIES
----------------------------
-"""
-                for cls, prob in sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True):
-                    text_report += f"{cls}: {prob*100:.1f}%\n"
-
-                text_report += f"""
-HEALTH SCORE BREAKDOWN
-----------------------
-Disease Detection (60%): {breakdown["components"]["Disease Detection (60%)"]:.0f}/60
-Reported Symptoms (20%): {breakdown["components"]["Reported Symptoms (20%)"]:.0f}/20
-Pet Metadata (20%): {breakdown["components"]["Pet Metadata (20%)"]:.0f}/20
-Total: {score}/100
-
-{breakdown["disease_note"]}
-{breakdown["symptom_note"]}
-{breakdown["metadata_note"]}
-
-CARE PLAN
----------
-Triage: {triage}
-Summary: {care_plan.get("summary", "")}
-
-Recommended Next Steps:
-"""
-                for step in care_plan.get("next_steps", []):
-                    text_report += f"  - {step}\n"
-
-                text_report += "\nHome Care Tips:\n"
-                for tip in care_plan.get("home_care", []):
-                    text_report += f"  - {tip}\n"
-
-                text_report += "\nWatch For:\n"
-                for item in care_plan.get("watch_for", []):
-                    text_report += f"  - {item}\n"
-
-                text_report += f"""
-DISCLAIMER
-----------
-{care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}
-
----
-PawScan AI — Powered by EfficientNet-B0 + Llama 3.3 70B
-"""
-
-                st.download_button(
-                    label="📝 Download Summary (Text)",
-                    data=text_report.encode("utf-8"),
-                    file_name=f"pawscan_summary_{pet_name or 'pet'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-
-                if result["is_healthy"] and score >= 80:
-                    st.balloons()
-
+                st.rerun()
         else:
             st.info("👆 Upload a photo to start the scan.")
 
     # ─── SCAN HISTORY PAGE ────────────────────────────────────
     elif page == "📋 Scan History":
         st.markdown("### 📋 Scan History")
-        st.markdown("Track your pet's health over time — each scan is saved here.")
+        st.markdown("Track your pet's health over time — click on any scan to view full details.")
 
         history = load_history()
 
         if not history:
             st.info("No scans yet. Run your first scan from the 'New Scan' page!")
         else:
+            # Health score trend chart
             if len(history) > 1:
                 st.markdown("#### 📈 Health Score Trend")
                 scores = [h["health_score"] for h in history]
                 trend_fig = go.Figure()
                 trend_fig.add_trace(go.Scatter(
-                    x=list(range(len(scores))),
-                    y=scores,
-                    mode='lines+markers',
-                    name='Health Score',
-                    line=dict(color='#2ecc71', width=3),
-                    marker=dict(size=10)
+                    x=list(range(len(scores))), y=scores, mode='lines+markers',
+                    name='Health Score', line=dict(color='#2ecc71', width=3), marker=dict(size=10)
                 ))
                 trend_fig.update_layout(
-                    xaxis_title="Scan #",
-                    yaxis_title="Health Score",
-                    yaxis=dict(range=[0, 100]),
-                    height=300,
+                    xaxis_title="Scan #", yaxis_title="Health Score",
+                    yaxis=dict(range=[0, 100]), height=300,
                     margin=dict(l=20, r=20, t=20, b=20)
                 )
                 st.plotly_chart(trend_fig, use_container_width=True)
 
-            st.markdown("#### 📝 All Scans")
-            for entry in reversed(history):
-                with st.container():
-                    col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
-                    with col1:
-                        st.markdown(f"**{entry['timestamp']}**")
-                    with col2:
-                        st.markdown(f"🐾 {entry['pet_name']} ({entry['species']})")
-                    with col3:
-                        st.markdown(f"🔍 {entry['display_name']}")
-                    with col4:
-                        st.markdown(f"💯 Score: {entry['health_score']}/100")
-                    st.markdown("---")
+            # Scan list — clickable cards
+            st.markdown("#### 📝 All Scans (Click to View Details)")
+
+            for i, entry in enumerate(reversed(history)):
+                idx = len(history) - i  # Display number
+                col_thumb, col_info, col_btn = st.columns([1, 3, 1])
+
+                with col_thumb:
+                    if "image_b64" in entry:
+                        try:
+                            img_data = base64.b64decode(entry["image_b64"])
+                            img = Image.open(BytesIO(img_data))
+                            st.image(img, width=80)
+                        except:
+                            st.markdown("🐾")
+                    else:
+                        st.markdown("🐾")
+
+                with col_info:
+                    st.markdown(f"**Scan #{idx}** — {entry['timestamp']}")
+                    st.markdown(f"🐾 {entry['pet_name']} ({entry['species']}) | "
+                                f"🔍 {entry['display_name']} | "
+                                f"💯 Score: {entry['health_score']}/100")
+
+                with col_btn:
+                    if st.button("View", key=f"view_{i}", use_container_width=True):
+                        # Load the full scan data for viewing
+                        st.session_state.viewing_history_scan = {
+                            "image": Image.open(BytesIO(base64.b64decode(entry["image_b64"]))) if "image_b64" in entry else None,
+                            "result": entry.get("result", {}),
+                            "score": entry.get("score", entry.get("health_score", 0)),
+                            "breakdown": entry.get("breakdown", {}),
+                            "care_plan": entry.get("care_plan", {}),
+                            "pet_info": entry.get("pet_info", {
+                                "name": entry.get("pet_name", ""),
+                                "species": entry.get("species", "Dog"),
+                                "breed": "", "age": 3, "weight": 15,
+                                "symptoms": entry.get("symptoms", [])
+                            }),
+                            "timestamp": entry.get("timestamp", "")
+                        }
+                        # Navigate to New Scan page to display it
+                        st.session_state.current_scan = None
+                        st.rerun()
+
+                st.markdown("---")
 
             if st.button("🗑️ Clear History"):
                 save_history([])
@@ -794,11 +802,17 @@ PawScan AI — Powered by EfficientNet-B0 + Llama 3.3 70B
         **PawScan AI** is an AI-powered pet health assessment platform that detects common skin conditions in pets from a single photo.
 
         #### How It Works
-        1. **Upload** a clear photo of your pet
+        1. **Upload** a close-up photo of your pet's skin area
         2. **AI Detection** — An EfficientNet-B0 model analyzes the image for 6 skin conditions
         3. **Health Score** — A 0-100 score is calculated from scan results + symptoms + pet metadata
         4. **Care Plan** — Get AI-generated recommendations for next steps and home care
         5. **Download Report** — Save the full results as an HTML or text file
+
+        #### 📸 Photo Tips for Best Results
+        - Take a **close-up** of the affected skin area (not a full body shot)
+        - Ensure **good lighting** (natural daylight is best)
+        - The affected area should **fill most of the frame**
+        - Avoid blurry or dark photos
 
         #### Detected Conditions
         - 🟢 **Healthy** — No issues detected
