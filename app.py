@@ -5,6 +5,7 @@ The main web app that ties together:
   - Disease detection (predict.py)
   - Health scoring (health_score.py)
   - LLM care recommendations (llm_advisor.py)
+  - Downloadable report generation
 
 Run locally:
     streamlit run app.py
@@ -20,6 +21,7 @@ import os
 import sys
 import json
 import time
+import base64
 from datetime import datetime
 from io import BytesIO
 
@@ -53,30 +55,22 @@ SYMPTOM_OPTIONS = [
 
 
 # ─── API KEY: auto-load from Streamlit Secrets ───────────────
-# Checks st.secrets first (set in Streamlit Cloud dashboard),
-# then falls back to manual input in the sidebar.
 def get_api_key():
     """Get Groq API key from secrets, env, or manual input."""
-    # 1. Try Streamlit secrets (set in cloud dashboard)
     try:
         if "GROQ_API_KEY" in st.secrets:
             return st.secrets["GROQ_API_KEY"]
     except Exception:
         pass
-
-    # 2. Try environment variable (for local dev)
     env_key = os.environ.get("GROQ_API_KEY", "")
     if env_key:
         return env_key
-
-    # 3. Return empty — app will show manual input field
     return ""
 
 
 # ─── CACHED MODEL LOADER ─────────────────────────────────────
 @st.cache_resource
 def load_model():
-    """Load the trained model once and cache it."""
     try:
         predictor = PawScanPredictor(MODEL_PATH, CLASS_NAMES_PATH)
         return predictor
@@ -87,7 +81,6 @@ def load_model():
 
 @st.cache_data
 def load_disease_info():
-    """Load disease information database."""
     try:
         with open(DISEASE_INFO_PATH) as f:
             return json.load(f)
@@ -96,7 +89,6 @@ def load_disease_info():
 
 
 def load_history():
-    """Load scan history from JSON file."""
     try:
         with open(HISTORY_FILE) as f:
             return json.load(f)
@@ -105,14 +97,12 @@ def load_history():
 
 
 def save_history(history):
-    """Save scan history to JSON file."""
     with open(HISTORY_FILE, 'w') as f:
         json.dump(history, f, indent=2)
 
 
 # ─── VISUALIZATION FUNCTIONS ─────────────────────────────────
 def plot_health_gauge(score):
-    """Create a health score gauge chart using Plotly."""
     if score >= 80:
         color = "#2ecc71"
     elif score >= 60:
@@ -147,7 +137,6 @@ def plot_health_gauge(score):
             }
         }
     ))
-
     fig.update_layout(height=280, margin=dict(l=20, r=20, t=50, b=20),
                       paper_bgcolor="rgba(0,0,0,0)",
                       font={'color': "#333", 'family': "Arial"})
@@ -155,44 +144,34 @@ def plot_health_gauge(score):
 
 
 def plot_probability_bars(probabilities, display_names=None):
-    """Create a horizontal bar chart showing all class probabilities."""
     classes = list(probabilities.keys())
     values = [probabilities[c] * 100 for c in classes]
-
     if display_names:
         labels = [display_names.get(c, c) for c in classes]
     else:
         labels = classes
-
     sorted_data = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
     labels, values = zip(*sorted_data)
-
     colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c']
     colors = colors[:len(labels)]
-
     fig, ax = plt.subplots(figsize=(8, 4))
     bars = ax.barh(labels, values, color=colors)
     ax.set_xlabel('Probability (%)', fontsize=11)
     ax.set_title('AI Detection Results — All Conditions', fontsize=13)
     ax.set_xlim(0, 100)
-
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2,
                 f'{val:.1f}%', va='center', fontsize=10, fontweight='bold')
-
     ax.invert_yaxis()
     plt.tight_layout()
     return fig
 
 
 def plot_score_breakdown(breakdown):
-    """Create a pie chart showing score component breakdown."""
     components = breakdown["components"]
     labels = list(components.keys())
     values = list(components.values())
-
     colors = ['#3498db', '#e74c3c', '#f39c12']
-
     fig, ax = plt.subplots(figsize=(6, 6))
     wedges, texts, autotexts = ax.pie(
         values, labels=labels, colors=colors,
@@ -204,9 +183,239 @@ def plot_score_breakdown(breakdown):
     return fig
 
 
+# ─── REPORT GENERATION ───────────────────────────────────────
+def generate_html_report(image, result, score, breakdown, care_plan,
+                         pet_name, pet_species, pet_breed, pet_age,
+                         pet_weight, symptoms, disease_info):
+    """Generate a self-contained HTML report with all results."""
+
+    # Convert image to base64 for embedding
+    img_buffer = BytesIO()
+    image.save(img_buffer, format="PNG")
+    img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+
+    # Format symptoms
+    if not symptoms or "None" in symptoms:
+        symptoms_str = "No symptoms reported"
+    else:
+        symptoms_str = ", ".join(symptoms)
+
+    # Triage color
+    triage = care_plan.get("triage", "ROUTINE")
+    triage_colors = {
+        "URGENT": ("#e74c3c", "#fdf2f2"),
+        "NON-URGENT": ("#f39c12", "#fff9e6"),
+        "ROUTINE": ("#2ecc71", "#f0fff4")
+    }
+    triage_color, triage_bg = triage_colors.get(triage, ("#2ecc71", "#f0fff4"))
+
+    # Score color
+    if score >= 80:
+        score_color = "#2ecc71"
+    elif score >= 60:
+        score_color = "#f1c40f"
+    elif score >= 40:
+        score_color = "#e67e22"
+    else:
+        score_color = "#e74c3c"
+
+    # Build probability bars HTML
+    prob_bars_html = ""
+    sorted_probs = sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True)
+    bar_colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c']
+    for i, (cls, prob) in enumerate(sorted_probs):
+        display = result.get("display_name", cls) if cls == result["predicted_class"] else cls
+        pct = prob * 100
+        color = bar_colors[i % len(bar_colors)]
+        prob_bars_html += f"""
+        <div style="margin-bottom: 8px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 3px;">
+                <span style="font-size: 13px; font-weight: 600;">{display}</span>
+                <span style="font-size: 13px; font-weight: bold; color: {color};">{pct:.1f}%</span>
+            </div>
+            <div style="background: #f0f0f0; border-radius: 4px; height: 20px;">
+                <div style="background: {color}; border-radius: 4px; height: 20px; width: {pct}%;"></div>
+            </div>
+        </div>
+        """
+
+    # Next steps HTML
+    next_steps_html = "".join(f"<li>{step}</li>" for step in care_plan.get("next_steps", []))
+    home_care_html = "".join(f"<li>{tip}</li>" for tip in care_plan.get("home_care", []))
+    watch_for_html = "".join(f"<li>{item}</li>" for item in care_plan.get("watch_for", []))
+
+    # Disease info
+    disease_key = result["predicted_class"]
+    disease_desc = ""
+    disease_treatment = ""
+    disease_contagious = ""
+    disease_symptoms = ""
+    if disease_key in disease_info:
+        info = disease_info[disease_key]
+        disease_desc = info.get("description", "N/A")
+        disease_treatment = info.get("treatment_approach", "N/A")
+        disease_contagious = "Yes" if info.get("contagious_to_humans") else "No"
+        disease_symptoms = ", ".join(info.get("common_symptoms", []))
+
+    # Score components
+    components_html = ""
+    for component, points in breakdown["components"].items():
+        max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
+        components_html += f"""
+        <tr>
+            <td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td>
+        </tr>
+        """
+
+    report_datetime = datetime.now().strftime("%Y-%m-%d at %H:%M")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PawScan AI — Health Report for {pet_name or "Pet"}</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; color: #333; }}
+        .container {{ max-width: 800px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; }}
+        .header h1 {{ margin: 0; font-size: 28px; }}
+        .header p {{ margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; }}
+        .section {{ padding: 25px 30px; border-bottom: 1px solid #f0f0f0; }}
+        .section h2 {{ font-size: 18px; color: #2c3e50; margin: 0 0 15px 0; border-left: 4px solid #667eea; padding-left: 10px; }}
+        .pet-info {{ display: flex; flex-wrap: wrap; gap: 15px; }}
+        .pet-info-item {{ flex: 1; min-width: 120px; }}
+        .pet-info-label {{ font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .pet-info-value {{ font-size: 16px; font-weight: 600; margin-top: 2px; }}
+        .result-grid {{ display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }}
+        .result-photo {{ flex: 0 0 300px; }}
+        .result-photo img {{ width: 100%; border-radius: 8px; }}
+        .result-details {{ flex: 1; min-width: 250px; }}
+        .score-circle {{ width: 120px; height: 120px; border-radius: 50%; border: 8px solid {score_color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px auto; }}
+        .score-number {{ font-size: 36px; font-weight: bold; color: {score_color}; }}
+        .score-label {{ text-align: center; font-size: 14px; color: #666; }}
+        .triage-badge {{ display: inline-block; padding: 6px 20px; border-radius: 20px; font-size: 14px; font-weight: bold; color: white; background: {triage_color}; margin-bottom: 10px; }}
+        .condition-name {{ font-size: 22px; font-weight: bold; margin: 5px 0; }}
+        .confidence {{ font-size: 14px; color: #666; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        th {{ text-align: left; padding: 8px; background: #f8f9fa; border-bottom: 2px solid #ddd; font-size: 13px; }}
+        ul {{ margin: 8px 0; padding-left: 20px; }}
+        li {{ margin-bottom: 6px; font-size: 14px; }}
+        .disclaimer {{ background: #fff3cd; padding: 15px 30px; font-size: 12px; color: #856404; }}
+        .footer {{ padding: 20px 30px; text-align: center; font-size: 12px; color: #999; }}
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <div class="header">
+        <h1>PawScan AI — Health Report</h1>
+        <p>Generated on {report_datetime}</p>
+    </div>
+
+    <div class="section">
+        <h2>Pet Information</h2>
+        <div class="pet-info">
+            <div class="pet-info-item"><div class="pet-info-label">Name</div><div class="pet-info-value">{pet_name or "Unnamed"}</div></div>
+            <div class="pet-info-item"><div class="pet-info-label">Species</div><div class="pet-info-value">{pet_species}</div></div>
+            <div class="pet-info-item"><div class="pet-info-label">Breed</div><div class="pet-info-value">{pet_breed or "Unknown"}</div></div>
+            <div class="pet-info-item"><div class="pet-info-label">Age</div><div class="pet-info-value">{pet_age} years</div></div>
+            <div class="pet-info-item"><div class="pet-info-label">Weight</div><div class="pet-info-value">{pet_weight} kg</div></div>
+            <div class="pet-info-item"><div class="pet-info-label">Symptoms</div><div class="pet-info-value">{symptoms_str}</div></div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Scan Results</h2>
+        <div class="result-grid">
+            <div class="result-photo">
+                <img src="data:image/png;base64,{img_b64}" alt="Pet Photo">
+            </div>
+            <div class="result-details">
+                <div class="score-circle">
+                    <div class="score-number">{score}</div>
+                </div>
+                <div class="score-label">Health Score (out of 100)</div>
+                <div style="margin-top: 15px;">
+                    <div class="triage-badge">{triage}</div>
+                    <div class="condition-name">{result["display_name"]}</div>
+                    <div class="confidence">Confidence: {result["confidence_pct"]:.1f}% | Severity: {result["severity"].title()}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>AI Detection — All Conditions</h2>
+        {prob_bars_html}
+    </div>
+
+    <div class="section">
+        <h2>Health Score Breakdown</h2>
+        <table>
+            <thead>
+                <tr><th>Component</th><th style="text-align: right;">Score</th></tr>
+            </thead>
+            <tbody>
+                {components_html}
+                <tr style="background: #f8f9fa; font-weight: bold;">
+                    <td style="padding: 10px;">Total Health Score</td>
+                    <td style="padding: 10px; text-align: right; font-size: 18px; color: {score_color};">{score} / 100</td>
+                </tr>
+            </tbody>
+        </table>
+        <div style="margin-top: 10px; font-size: 13px; color: #666;">
+            <p><strong>Disease Detection:</strong> {breakdown["disease_note"]}</p>
+            <p><strong>Symptoms:</strong> {breakdown["symptom_note"]}</p>
+            <p><strong>Metadata:</strong> {breakdown["metadata_note"]}</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Care Plan</h2>
+        <div class="triage-badge">{triage}</div>
+        <p style="font-size: 15px; margin: 10px 0;">{care_plan.get("summary", "")}</p>
+        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Recommended Next Steps</h3>
+        <ul>{next_steps_html}</ul>
+        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Home Care Tips</h3>
+        <ul>{home_care_html}</ul>
+        <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Watch For</h3>
+        <ul>{watch_for_html}</ul>
+    </div>
+"""
+
+    if disease_desc:
+        html += f"""
+    <div class="section">
+        <h2>Disease Information</h2>
+        <p style="font-size: 14px;"><strong>Condition:</strong> {result["display_name"]}</p>
+        <p style="font-size: 14px;"><strong>Description:</strong> {disease_desc}</p>
+        <p style="font-size: 14px;"><strong>Treatment:</strong> {disease_treatment}</p>
+        <p style="font-size: 14px;"><strong>Common symptoms:</strong> {disease_symptoms}</p>
+        <p style="font-size: 14px;"><strong>Contagious to humans:</strong> {disease_contagious}</p>
+    </div>
+"""
+
+    html += f"""
+    <div class="disclaimer">
+        <strong>Disclaimer:</strong> {care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}
+    </div>
+
+    <div class="footer">
+        PawScan AI — AI-Powered Pet Health Assessment<br>
+        Report generated on {report_datetime} | Powered by EfficientNet-B0 + Llama 3.3 70B
+    </div>
+
+</div>
+</body>
+</html>"""
+
+    return html
+
+
 # ─── MAIN APP ────────────────────────────────────────────────
 def main():
-    # Header
     st.markdown("""
     <div style='text-align: center; padding: 10px 0 20px 0;'>
         <h1 style='font-size: 2.5em; margin-bottom: 5px;'>🐾 PawScan AI</h1>
@@ -214,7 +423,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Load model
     predictor = load_model()
     disease_info = load_disease_info()
 
@@ -227,7 +435,6 @@ def main():
     st.sidebar.markdown("### 🐾 PawScan AI")
     st.sidebar.markdown("---")
 
-    # Pet profile
     st.sidebar.markdown("#### Pet Profile")
     pet_name = st.sidebar.text_input("Pet Name", value="", placeholder="e.g. Bruno")
     pet_species = st.sidebar.selectbox("Species", ["Dog", "Cat"])
@@ -237,10 +444,8 @@ def main():
 
     st.sidebar.markdown("---")
 
-    # Navigation
     page = st.sidebar.radio("Navigate", ["🔍 New Scan", "📋 Scan History", "ℹ️ About"])
 
-    # ─── API KEY: auto-load from secrets ─────────────────────
     auto_api_key = get_api_key()
 
     # ─── NEW SCAN PAGE ───────────────────────────────────────
@@ -256,7 +461,6 @@ def main():
                 type=['jpg', 'jpeg', 'png'],
                 help="JPG or PNG. Best results with close-up, well-lit photos."
             )
-
             if uploaded_file:
                 image = Image.open(uploaded_file)
                 st.image(image, caption="Uploaded Photo", use_container_width=True)
@@ -270,13 +474,11 @@ def main():
                 default=["None"],
                 label_visibility="collapsed"
             )
-
             if "None" in symptoms and len(symptoms) > 1:
                 symptoms = [s for s in symptoms if s != "None"]
 
             st.markdown("")
 
-            # API key section — only show if not in secrets
             if auto_api_key:
                 st.success("✅ LLM Care Plan enabled (API key loaded from secrets)")
                 api_key = auto_api_key
@@ -287,7 +489,6 @@ def main():
                     api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
                     st.markdown("Leave empty to use built-in care recommendations.")
 
-        # Scan button
         st.markdown("---")
 
         if uploaded_file:
@@ -298,7 +499,6 @@ def main():
             if scan_clicked:
                 with st.spinner("🤖 AI is analyzing your pet's photo..."):
                     time.sleep(0.5)
-
                     image = Image.open(uploaded_file)
                     result = predictor.predict(image)
 
@@ -349,7 +549,6 @@ def main():
                     st.markdown("#### 💯 Health Score")
                     gauge_fig = plot_health_gauge(score)
                     st.plotly_chart(gauge_fig, use_container_width=True)
-
                     status_level = breakdown["status_level"]
                     if status_level == "good":
                         st.success(breakdown["status"])
@@ -395,11 +594,7 @@ def main():
                 st.markdown("### 🩺 Care Plan")
 
                 triage = care_plan.get("triage", "ROUTINE")
-                triage_colors = {
-                    "URGENT": "🔴",
-                    "NON-URGENT": "🟡",
-                    "ROUTINE": "🟢"
-                }
+                triage_colors = {"URGENT": "🔴", "NON-URGENT": "🟡", "ROUTINE": "🟢"}
                 st.markdown(f"### {triage_colors.get(triage, '🟢')} Triage: {triage}")
                 st.markdown(f"**Summary:** {care_plan.get('summary', '')}")
 
@@ -434,6 +629,109 @@ def main():
                 st.markdown("---")
                 st.warning("⚠️ **Disclaimer:** " + care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian."))
 
+                # ─── DOWNLOAD REPORT BUTTON ─────────────────────
+                st.markdown("---")
+                st.markdown("### 📄 Download Report")
+
+                # Generate HTML report
+                html_report = generate_html_report(
+                    image=image,
+                    result=result,
+                    score=score,
+                    breakdown=breakdown,
+                    care_plan=care_plan,
+                    pet_name=pet_name,
+                    pet_species=pet_species,
+                    pet_breed=pet_breed,
+                    pet_age=pet_age,
+                    pet_weight=pet_weight,
+                    symptoms=symptoms,
+                    disease_info=disease_info
+                )
+
+                # Download button for HTML report
+                st.download_button(
+                    label="📥 Download Full Report (HTML)",
+                    data=html_report.encode("utf-8"),
+                    file_name=f"pawscan_report_{pet_name or 'pet'}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
+
+                # Also offer a text summary
+                text_report = f"""PAWSCAN AI — PET HEALTH REPORT
+================================
+Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+PET INFORMATION
+----------------
+Name: {pet_name or "Unnamed"}
+Species: {pet_species}
+Breed: {pet_breed or "Unknown"}
+Age: {pet_age} years
+Weight: {pet_weight} kg
+Symptoms: {", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"}
+
+SCAN RESULTS
+------------
+Detected Condition: {result["display_name"]}
+Confidence: {result["confidence_pct"]:.1f}%
+Severity: {result["severity"].title()}
+Health Score: {score}/100
+
+ALL CONDITION PROBABILITIES
+---------------------------
+"""
+                for cls, prob in sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True):
+                    text_report += f"{cls}: {prob*100:.1f}%\n"
+
+                text_report += f"""
+HEALTH SCORE BREAKDOWN
+----------------------
+Disease Detection (60%): {breakdown["components"]["Disease Detection (60%)"]:.0f}/60
+Reported Symptoms (20%): {breakdown["components"]["Reported Symptoms (20%)"]:.0f}/20
+Pet Metadata (20%): {breakdown["components"]["Pet Metadata (20%)"]:.0f}/20
+Total: {score}/100
+
+{breakdown["disease_note"]}
+{breakdown["symptom_note"]}
+{breakdown["metadata_note"]}
+
+CARE PLAN
+---------
+Triage: {triage}
+Summary: {care_plan.get("summary", "")}
+
+Recommended Next Steps:
+"""
+                for step in care_plan.get("next_steps", []):
+                    text_report += f"  - {step}\n"
+
+                text_report += "\nHome Care Tips:\n"
+                for tip in care_plan.get("home_care", []):
+                    text_report += f"  - {tip}\n"
+
+                text_report += "\nWatch For:\n"
+                for item in care_plan.get("watch_for", []):
+                    text_report += f"  - {item}\n"
+
+                text_report += f"""
+DISCLAIMER
+----------
+{care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}
+
+---
+PawScan AI — Powered by EfficientNet-B0 + Llama 3.3 70B
+"""
+
+                st.download_button(
+                    label="📝 Download Summary (Text)",
+                    data=text_report.encode("utf-8"),
+                    file_name=f"pawscan_summary_{pet_name or 'pet'}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+
                 if result["is_healthy"] and score >= 80:
                     st.balloons()
 
@@ -453,8 +751,6 @@ def main():
             if len(history) > 1:
                 st.markdown("#### 📈 Health Score Trend")
                 scores = [h["health_score"] for h in history]
-                dates = [h["timestamp"] for h in history]
-
                 trend_fig = go.Figure()
                 trend_fig.add_trace(go.Scatter(
                     x=list(range(len(scores))),
@@ -474,7 +770,7 @@ def main():
                 st.plotly_chart(trend_fig, use_container_width=True)
 
             st.markdown("#### 📝 All Scans")
-            for i, entry in enumerate(reversed(history)):
+            for entry in reversed(history):
                 with st.container():
                     col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
                     with col1:
@@ -494,7 +790,6 @@ def main():
     # ─── ABOUT PAGE ───────────────────────────────────────────
     elif page == "ℹ️ About":
         st.markdown("### ℹ️ About PawScan AI")
-
         st.markdown("""
         **PawScan AI** is an AI-powered pet health assessment platform that detects common skin conditions in pets from a single photo.
 
@@ -503,6 +798,7 @@ def main():
         2. **AI Detection** — An EfficientNet-B0 model analyzes the image for 6 skin conditions
         3. **Health Score** — A 0-100 score is calculated from scan results + symptoms + pet metadata
         4. **Care Plan** — Get AI-generated recommendations for next steps and home care
+        5. **Download Report** — Save the full results as an HTML or text file
 
         #### Detected Conditions
         - 🟢 **Healthy** — No issues detected
