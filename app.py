@@ -116,7 +116,16 @@ def save_history_with_image(history_entry, image):
     history = load_history()
 
     # Convert image to base64 thumbnail
+    # Force RGB mode (handles PNG with alpha channel / transparency)
     img_thumb = image.copy()
+    if img_thumb.mode != "RGB":
+        # Create white background and paste image (preserves appearance)
+        bg = Image.new("RGB", img_thumb.size, (255, 255, 255))
+        if img_thumb.mode in ("RGBA", "LA", "P"):
+            bg.paste(img_thumb, mask=img_thumb.convert("RGBA").split()[-1])
+        else:
+            bg.paste(img_thumb.convert("RGB"))
+        img_thumb = bg
     img_thumb.thumbnail((200, 200))
     img_buffer = BytesIO()
     img_thumb.save(img_buffer, format="JPEG", quality=70)
@@ -339,8 +348,12 @@ def generate_html_report(image, result, score, breakdown, care_plan,
                          pet_name, pet_species, pet_breed, pet_age,
                          pet_weight, symptoms, disease_info):
     """Generate a self-contained HTML report."""
+    # Ensure RGB mode for consistent encoding
+    report_image = image.copy()
+    if report_image.mode != "RGB":
+        report_image = report_image.convert("RGB")
     img_buffer = BytesIO()
-    image.save(img_buffer, format="PNG")
+    report_image.save(img_buffer, format="PNG")
     img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
 
     symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
