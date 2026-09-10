@@ -13,6 +13,7 @@ Deploy free on Streamlit Community Cloud:
     1. Push code to GitHub
     2. Go to share.streamlit.io
     3. Connect your repo and deploy
+    4. Add GROQ_API_KEY in App Settings → Secrets
 """
 
 import os
@@ -32,20 +33,11 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
 # ─── PATH SETUP ──────────────────────────────────────────────
-# Add src directory to path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from predict import PawScanPredictor
 from health_score import calculate_health_score
 from llm_advisor import generate_care_plan
-
-# ─── PAGE CONFIG ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="PawScan AI — Pet Health Assessment",
-    page_icon="🐾",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # ─── CONSTANTS ───────────────────────────────────────────────
 MODEL_PATH = "models/pawscan_model.pth"
@@ -59,6 +51,28 @@ SYMPTOM_OPTIONS = [
     "Weight loss", "Swelling"
 ]
 
+
+# ─── API KEY: auto-load from Streamlit Secrets ───────────────
+# Checks st.secrets first (set in Streamlit Cloud dashboard),
+# then falls back to manual input in the sidebar.
+def get_api_key():
+    """Get Groq API key from secrets, env, or manual input."""
+    # 1. Try Streamlit secrets (set in cloud dashboard)
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+
+    # 2. Try environment variable (for local dev)
+    env_key = os.environ.get("GROQ_API_KEY", "")
+    if env_key:
+        return env_key
+
+    # 3. Return empty — app will show manual input field
+    return ""
+
+
 # ─── CACHED MODEL LOADER ─────────────────────────────────────
 @st.cache_resource
 def load_model():
@@ -70,6 +84,7 @@ def load_model():
         st.error(f"Failed to load model: {e}")
         return None
 
+
 @st.cache_data
 def load_disease_info():
     """Load disease information database."""
@@ -79,6 +94,7 @@ def load_disease_info():
     except FileNotFoundError:
         return {}
 
+
 def load_history():
     """Load scan history from JSON file."""
     try:
@@ -87,10 +103,12 @@ def load_history():
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
+
 def save_history(history):
     """Save scan history to JSON file."""
     with open(HISTORY_FILE, 'w') as f:
         json.dump(history, f, indent=2)
+
 
 # ─── VISUALIZATION FUNCTIONS ─────────────────────────────────
 def plot_health_gauge(score):
@@ -135,18 +153,17 @@ def plot_health_gauge(score):
                       font={'color': "#333", 'family': "Arial"})
     return fig
 
+
 def plot_probability_bars(probabilities, display_names=None):
     """Create a horizontal bar chart showing all class probabilities."""
     classes = list(probabilities.keys())
     values = [probabilities[c] * 100 for c in classes]
 
-    labels = []
     if display_names:
         labels = [display_names.get(c, c) for c in classes]
     else:
         labels = classes
 
-    # Sort by value descending
     sorted_data = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
     labels, values = zip(*sorted_data)
 
@@ -167,6 +184,7 @@ def plot_probability_bars(probabilities, display_names=None):
     plt.tight_layout()
     return fig
 
+
 def plot_score_breakdown(breakdown):
     """Create a pie chart showing score component breakdown."""
     components = breakdown["components"]
@@ -184,6 +202,7 @@ def plot_score_breakdown(breakdown):
     ax.set_title('Health Score Breakdown', fontsize=13)
     plt.tight_layout()
     return fig
+
 
 # ─── MAIN APP ────────────────────────────────────────────────
 def main():
@@ -221,6 +240,9 @@ def main():
     # Navigation
     page = st.sidebar.radio("Navigate", ["🔍 New Scan", "📋 Scan History", "ℹ️ About"])
 
+    # ─── API KEY: auto-load from secrets ─────────────────────
+    auto_api_key = get_api_key()
+
     # ─── NEW SCAN PAGE ───────────────────────────────────────
     if page == "🔍 New Scan":
         st.markdown("### Upload a Photo of Your Pet")
@@ -249,18 +271,21 @@ def main():
                 label_visibility="collapsed"
             )
 
-            # Clean symptoms
             if "None" in symptoms and len(symptoms) > 1:
                 symptoms = [s for s in symptoms if s != "None"]
 
             st.markdown("")
 
-            # API key for LLM (optional — stored in session)
-            with st.expander("⚙️ Advanced — LLM Care Plan (Optional)"):
-                st.markdown("Enter a free Groq API key for AI-generated care recommendations.")
-                st.markdown("Get one at [console.groq.com](https://console.groq.com) — free, no credit card.")
-                api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
-                st.markdown("Leave empty to use built-in care recommendations.")
+            # API key section — only show if not in secrets
+            if auto_api_key:
+                st.success("✅ LLM Care Plan enabled (API key loaded from secrets)")
+                api_key = auto_api_key
+            else:
+                with st.expander("⚙️ Advanced — LLM Care Plan (Optional)"):
+                    st.markdown("Enter a free Groq API key for AI-generated care recommendations.")
+                    st.markdown("Get one at [console.groq.com](https://console.groq.com) — free, no credit card.")
+                    api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
+                    st.markdown("Leave empty to use built-in care recommendations.")
 
         # Scan button
         st.markdown("---")
@@ -271,18 +296,12 @@ def main():
                 scan_clicked = st.button("🔍 Scan Now", use_container_width=True, type="primary")
 
             if scan_clicked:
-                # Run inference
                 with st.spinner("🤖 AI is analyzing your pet's photo..."):
-                    # Small delay for UX
                     time.sleep(0.5)
 
-                    # Convert uploaded file to PIL Image
                     image = Image.open(uploaded_file)
-
-                    # Run prediction
                     result = predictor.predict(image)
 
-                    # Calculate health score
                     score, breakdown = calculate_health_score(
                         prediction_result=result,
                         pet_species=pet_species,
@@ -291,7 +310,6 @@ def main():
                         symptoms=symptoms
                     )
 
-                    # Generate care plan
                     care_plan = generate_care_plan(
                         prediction=result,
                         pet_species=pet_species,
@@ -299,7 +317,7 @@ def main():
                         pet_age=pet_age,
                         pet_weight=pet_weight,
                         symptoms=symptoms,
-                        api_key=api_key if 'api_key' in locals() else ""
+                        api_key=api_key if 'api_key' in locals() else auto_api_key
                     )
 
                 # ─── RESULTS ───────────────────────────────────
@@ -321,7 +339,6 @@ def main():
                 history.append(history_entry)
                 save_history(history)
 
-                # Layout: 3 columns
                 col1, col2, col3 = st.columns([1, 1, 1])
 
                 with col1:
@@ -333,7 +350,6 @@ def main():
                     gauge_fig = plot_health_gauge(score)
                     st.plotly_chart(gauge_fig, use_container_width=True)
 
-                    # Status
                     status_level = breakdown["status_level"]
                     if status_level == "good":
                         st.success(breakdown["status"])
@@ -350,13 +366,13 @@ def main():
                     st.metric("Confidence", f"{result['confidence_pct']:.1f}%")
                     st.metric("Severity", result["severity"].title())
 
-                # ─── PROBABILITY CHART ─────────────────────────
+                # Probability chart
                 st.markdown("---")
                 st.markdown("### AI Detection — All Conditions")
                 prob_fig = plot_probability_bars(result["all_probabilities"], predictor.display_names)
                 st.pyplot(prob_fig)
 
-                # ─── SCORE BREAKDOWN ───────────────────────────
+                # Score breakdown
                 col_score, col_breakdown = st.columns([1, 1])
 
                 with col_score:
@@ -367,17 +383,17 @@ def main():
                 with col_breakdown:
                     st.markdown("### Score Components")
                     for component, points in breakdown["components"].items():
-                        st.markdown(f"**{component}:** {points:.0f} / {component.split('(')[1].rstrip(')')} pts")
+                        max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
+                        st.markdown(f"**{component}:** {points:.0f} / {max_pts} pts")
                     st.markdown("")
                     st.info(f"📋 **Disease Detection:** {breakdown['disease_note']}")
                     st.info(f"🩺 **Symptoms:** {breakdown['symptom_note']}")
                     st.info(f"📊 **Metadata:** {breakdown['metadata_note']}")
 
-                # ─── CARE PLAN ─────────────────────────────────
+                # Care plan
                 st.markdown("---")
                 st.markdown("### 🩺 Care Plan")
 
-                # Triage badge
                 triage = care_plan.get("triage", "ROUTINE")
                 triage_colors = {
                     "URGENT": "🔴",
@@ -385,8 +401,6 @@ def main():
                     "ROUTINE": "🟢"
                 }
                 st.markdown(f"### {triage_colors.get(triage, '🟢')} Triage: {triage}")
-
-                # Summary
                 st.markdown(f"**Summary:** {care_plan.get('summary', '')}")
 
                 col_steps, col_care = st.columns([1, 1])
@@ -420,7 +434,6 @@ def main():
                 st.markdown("---")
                 st.warning("⚠️ **Disclaimer:** " + care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian."))
 
-                # Success balloon for healthy results
                 if result["is_healthy"] and score >= 80:
                     st.balloons()
 
@@ -437,7 +450,6 @@ def main():
         if not history:
             st.info("No scans yet. Run your first scan from the 'New Scan' page!")
         else:
-            # Show trend chart
             if len(history) > 1:
                 st.markdown("#### 📈 Health Score Trend")
                 scores = [h["health_score"] for h in history]
@@ -461,7 +473,6 @@ def main():
                 )
                 st.plotly_chart(trend_fig, use_container_width=True)
 
-            # Show history table
             st.markdown("#### 📝 All Scans")
             for i, entry in enumerate(reversed(history)):
                 with st.container():
@@ -476,7 +487,6 @@ def main():
                         st.markdown(f"💯 Score: {entry['health_score']}/100")
                     st.markdown("---")
 
-            # Clear history button
             if st.button("🗑️ Clear History"):
                 save_history([])
                 st.rerun()
@@ -512,6 +522,7 @@ def main():
         #### ⚠️ Important Disclaimer
         This tool is for informational purposes only and is **not a substitute for professional veterinary diagnosis**. Always consult a licensed veterinarian for health concerns about your pet.
         """)
+
 
 if __name__ == "__main__":
     main()
