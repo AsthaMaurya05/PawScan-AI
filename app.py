@@ -8,9 +8,6 @@ Features:
   - Session state management (results persist across page navigation)
   - Clickable scan history (view past scan details)
   - Downloadable reports (HTML + Text)
-
-Run locally:
-    streamlit run app.py
 """
 
 import os
@@ -50,19 +47,31 @@ SYMPTOM_OPTIONS = [
 ]
 
 
-# ─── SESSION STATE INITIALIZATION ────────────────────────────
+# ─── IMAGE UTILITY ───────────────────────────────────────────
+def image_to_b64(image, max_size=None, fmt="JPEG", quality=85):
+    """Convert PIL Image to base64 string. Handles all image modes."""
+    img = image.copy()
+    if max_size:
+        img.thumbnail((max_size, max_size))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format=fmt, quality=quality)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def b64_to_image(b64_str):
+    """Convert base64 string back to PIL Image."""
+    img_data = base64.b64decode(b64_str)
+    return Image.open(BytesIO(img_data))
+
+
+# ─── SESSION STATE ───────────────────────────────────────────
 def init_session_state():
-    """Initialize session state variables for persisting scan results."""
     if "current_scan" not in st.session_state:
-        st.session_state.current_scan = None  # Stores full scan data
+        st.session_state.current_scan = None
     if "viewing_history_scan" not in st.session_state:
-        st.session_state.viewing_history_scan = None  # When viewing a past scan
-
-
-def clear_current_scan():
-    """Clear the current scan results."""
-    st.session_state.current_scan = None
-    st.session_state.viewing_history_scan = None
+        st.session_state.viewing_history_scan = None
 
 
 # ─── API KEY ─────────────────────────────────────────────────
@@ -72,18 +81,14 @@ def get_api_key():
             return st.secrets["GROQ_API_KEY"]
     except Exception:
         pass
-    env_key = os.environ.get("GROQ_API_KEY", "")
-    if env_key:
-        return env_key
-    return ""
+    return os.environ.get("GROQ_API_KEY", "")
 
 
-# ─── CACHED MODEL LOADER ─────────────────────────────────────
+# ─── CACHED LOADERS ─────────────────────────────────────────
 @st.cache_resource
 def load_model():
     try:
-        predictor = PawScanPredictor(MODEL_PATH, CLASS_NAMES_PATH)
-        return predictor
+        return PawScanPredictor(MODEL_PATH, CLASS_NAMES_PATH)
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         return None
@@ -111,41 +116,20 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
-def save_history_with_image(history_entry, image):
-    """Save scan to history with embedded image (base64)."""
+def save_history_entry(history_entry, image):
+    """Save scan to history with embedded image thumbnail (base64)."""
     history = load_history()
-
-    # Convert image to base64 thumbnail
-    # Force RGB mode (handles PNG with alpha channel / transparency)
-    img_thumb = image.copy()
-    if img_thumb.mode != "RGB":
-        # Create white background and paste image (preserves appearance)
-        bg = Image.new("RGB", img_thumb.size, (255, 255, 255))
-        if img_thumb.mode in ("RGBA", "LA", "P"):
-            bg.paste(img_thumb, mask=img_thumb.convert("RGBA").split()[-1])
-        else:
-            bg.paste(img_thumb.convert("RGB"))
-        img_thumb = bg
-    img_thumb.thumbnail((200, 200))
-    img_buffer = BytesIO()
-    img_thumb.save(img_buffer, format="JPEG", quality=70)
-    img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
-
-    history_entry["image_b64"] = img_b64
+    history_entry["image_b64"] = image_to_b64(image, max_size=300, fmt="JPEG", quality=70)
     history.append(history_entry)
     save_history(history)
 
 
-# ─── VISUALIZATION FUNCTIONS ─────────────────────────────────
+# ─── VISUALIZATION ──────────────────────────────────────────
 def plot_health_gauge(score):
-    if score >= 80:
-        color = "#2ecc71"
-    elif score >= 60:
-        color = "#f1c40f"
-    elif score >= 40:
-        color = "#e67e22"
-    else:
-        color = "#e74c3c"
+    if score >= 80: color = "#2ecc71"
+    elif score >= 60: color = "#f1c40f"
+    elif score >= 40: color = "#e67e22"
+    else: color = "#e74c3c"
 
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=score,
@@ -173,10 +157,7 @@ def plot_health_gauge(score):
 def plot_probability_bars(probabilities, display_names=None):
     classes = list(probabilities.keys())
     values = [probabilities[c] * 100 for c in classes]
-    if display_names:
-        labels = [display_names.get(c, c) for c in classes]
-    else:
-        labels = classes
+    labels = [display_names.get(c, c) for c in classes] if display_names else classes
     sorted_data = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
     labels, values = zip(*sorted_data)
     colors = ['#e74c3c', '#f39c12', '#2ecc71', '#3498db', '#9b59b6', '#1abc9c'][:len(labels)]
@@ -205,10 +186,24 @@ def plot_score_breakdown(breakdown):
     return fig
 
 
-# ─── DISPLAY SCAN RESULTS (reusable for current + history scans) ──
+# ─── DISPLAY SCAN RESULTS ────────────────────────────────────
 def display_scan_results(scan_data, disease_info, predictor, show_download=True):
-    """Display full scan results. Used for both current scans and history scans."""
-    image = scan_data["image"]
+    """Display full scan results. Works for both current and history scans."""
+    # Handle image: could be PIL Image or base64 string
+    image = scan_data.get("image")
+    image_b64 = scan_data.get("image_b64")
+
+    if image is None and image_b64:
+        try:
+            image = b64_to_image(image_b64)
+        except:
+            image = None
+
+    if image is not None:
+        # Ensure it's a fresh RGB PIL Image (avoids format attribute issues)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
     result = scan_data["result"]
     score = scan_data["score"]
     breakdown = scan_data["breakdown"]
@@ -221,18 +216,18 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
 
     with col1:
         st.markdown("#### 📸 Photo")
-        st.image(image, use_container_width=True)
+        if image is not None:
+            st.image(image, use_container_width=True)
+        else:
+            st.markdown("🐾 *Photo not available*")
 
     with col2:
         st.markdown("#### 💯 Health Score")
-        gauge_fig = plot_health_gauge(score)
-        st.plotly_chart(gauge_fig, use_container_width=True)
+        st.plotly_chart(plot_health_gauge(score), use_container_width=True)
         status_level = breakdown["status_level"]
         if status_level == "good":
             st.success(breakdown["status"])
-        elif status_level == "moderate":
-            st.warning(breakdown["status"])
-        elif status_level == "concerning":
+        elif status_level in ("moderate", "concerning"):
             st.warning(breakdown["status"])
         else:
             st.error(breakdown["status"])
@@ -246,17 +241,13 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
     # Probability chart
     st.markdown("---")
     st.markdown("### AI Detection — All Conditions")
-    prob_fig = plot_probability_bars(result["all_probabilities"], predictor.display_names)
-    st.pyplot(prob_fig)
+    st.pyplot(plot_probability_bars(result["all_probabilities"], predictor.display_names))
 
     # Score breakdown
     col_score, col_breakdown = st.columns([1, 1])
-
     with col_score:
         st.markdown("### Score Breakdown")
-        pie_fig = plot_score_breakdown(breakdown)
-        st.pyplot(pie_fig)
-
+        st.pyplot(plot_score_breakdown(breakdown))
     with col_breakdown:
         st.markdown("### Score Components")
         for component, points in breakdown["components"].items():
@@ -270,19 +261,16 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
     # Care plan
     st.markdown("---")
     st.markdown("### 🩺 Care Plan")
-
     triage = care_plan.get("triage", "ROUTINE")
     triage_colors = {"URGENT": "🔴", "NON-URGENT": "🟡", "ROUTINE": "🟢"}
     st.markdown(f"### {triage_colors.get(triage, '🟢')} Triage: {triage}")
     st.markdown(f"**Summary:** {care_plan.get('summary', '')}")
 
     col_steps, col_care = st.columns([1, 1])
-
     with col_steps:
         st.markdown("#### ✅ Recommended Next Steps")
         for step in care_plan.get("next_steps", []):
             st.markdown(f"- {step}")
-
     with col_care:
         st.markdown("#### 🏠 Home Care Tips")
         for tip in care_plan.get("home_care", []):
@@ -303,7 +291,6 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
             if info.get("common_symptoms"):
                 st.markdown(f"**Common symptoms:** {', '.join(info['common_symptoms'])}")
 
-    # Disclaimer
     st.markdown("---")
     st.warning("⚠️ **Disclaimer:** " + care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian."))
 
@@ -312,26 +299,26 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
         st.markdown("---")
         st.markdown("### 📄 Download Report")
 
-        html_report = generate_html_report(
-            image=image, result=result, score=score, breakdown=breakdown,
-            care_plan=care_plan, pet_name=pet_info.get("name", ""),
-            pet_species=pet_info.get("species", "Dog"), pet_breed=pet_info.get("breed", ""),
-            pet_age=pet_info.get("age", 3), pet_weight=pet_info.get("weight", 15),
-            symptoms=pet_info.get("symptoms", []), disease_info=disease_info
-        )
-
-        pet_name_clean = pet_info.get("name", "pet").replace(" ", "_") or "pet"
-        st.download_button(
-            label="📥 Download Full Report (HTML)",
-            data=html_report.encode("utf-8"),
-            file_name=f"pawscan_report_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-            mime="text/html", use_container_width=True
-        )
+        if image is not None:
+            html_report = generate_html_report(
+                image=image, result=result, score=score, breakdown=breakdown,
+                care_plan=care_plan, pet_name=pet_info.get("name", ""),
+                pet_species=pet_info.get("species", "Dog"), pet_breed=pet_info.get("breed", ""),
+                pet_age=pet_info.get("age", 3), pet_weight=pet_info.get("weight", 15),
+                symptoms=pet_info.get("symptoms", []), disease_info=disease_info
+            )
+            pet_name_clean = (pet_info.get("name", "pet") or "pet").replace(" ", "_")
+            st.download_button(
+                label="📥 Download Full Report (HTML)",
+                data=html_report.encode("utf-8"),
+                file_name=f"pawscan_report_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                mime="text/html", use_container_width=True
+            )
 
         text_report = generate_text_report(
-            result=result, score=score, breakdown=breakdown, care_plan=care_plan,
-            pet_info=pet_info
+            result=result, score=score, breakdown=breakdown, care_plan=care_plan, pet_info=pet_info
         )
+        pet_name_clean = (pet_info.get("name", "pet") or "pet").replace(" ", "_")
         st.download_button(
             label="📝 Download Summary (Text)",
             data=text_report.encode("utf-8"),
@@ -348,19 +335,12 @@ def generate_html_report(image, result, score, breakdown, care_plan,
                          pet_name, pet_species, pet_breed, pet_age,
                          pet_weight, symptoms, disease_info):
     """Generate a self-contained HTML report."""
-    # Ensure RGB mode for consistent encoding
-    report_image = image.copy()
-    if report_image.mode != "RGB":
-        report_image = report_image.convert("RGB")
-    img_buffer = BytesIO()
-    report_image.save(img_buffer, format="PNG")
-    img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
-
+    img_b64 = image_to_b64(image, fmt="PNG")
     symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
 
     triage = care_plan.get("triage", "ROUTINE")
-    triage_colors_map = {"URGENT": ("#e74c3c", "#fdf2f2"), "NON-URGENT": ("#f39c12", "#fff9e6"), "ROUTINE": ("#2ecc71", "#f0fff4")}
-    triage_color, triage_bg = triage_colors_map.get(triage, ("#2ecc71", "#f0fff4"))
+    triage_colors_map = {"URGENT": "#e74c3c", "NON-URGENT": "#f39c12", "ROUTINE": "#2ecc71"}
+    triage_color = triage_colors_map.get(triage, "#2ecc71")
 
     if score >= 80: score_color = "#2ecc71"
     elif score >= 60: score_color = "#f1c40f"
@@ -374,16 +354,7 @@ def generate_html_report(image, result, score, breakdown, care_plan,
         display = result.get("display_name", cls) if cls == result["predicted_class"] else cls
         pct = prob * 100
         color = bar_colors[i % len(bar_colors)]
-        prob_bars_html += f"""
-        <div style="margin-bottom: 8px;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 3px;">
-                <span style="font-size: 13px; font-weight: 600;">{display}</span>
-                <span style="font-size: 13px; font-weight: bold; color: {color};">{pct:.1f}%</span>
-            </div>
-            <div style="background: #f0f0f0; border-radius: 4px; height: 20px;">
-                <div style="background: {color}; border-radius: 4px; height: 20px; width: {pct}%;"></div>
-            </div>
-        </div>"""
+        prob_bars_html += f'<div style="margin-bottom: 8px;"><div style="display: flex; justify-content: space-between; margin-bottom: 3px;"><span style="font-size: 13px; font-weight: 600;">{display}</span><span style="font-size: 13px; font-weight: bold; color: {color};">{pct:.1f}%</span></div><div style="background: #f0f0f0; border-radius: 4px; height: 20px;"><div style="background: {color}; border-radius: 4px; height: 20px; width: {pct}%;"></div></div></div>'
 
     next_steps_html = "".join(f"<li>{step}</li>" for step in care_plan.get("next_steps", []))
     home_care_html = "".join(f"<li>{tip}</li>" for tip in care_plan.get("home_care", []))
@@ -401,14 +372,16 @@ def generate_html_report(image, result, score, breakdown, care_plan,
     components_html = ""
     for component, points in breakdown["components"].items():
         max_pts = component.split('(')[1].rstrip(')').split('%')[0].strip()
-        components_html += f"""<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td></tr>"""
+        components_html += f'<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td></tr>'
 
     report_datetime = datetime.now().strftime("%Y-%m-%d at %H:%M")
 
+    disease_section = ""
+    if disease_desc:
+        disease_section = f'<div class="section"><h2>Disease Information</h2><p style="font-size: 14px;"><strong>Condition:</strong> {result["display_name"]}</p><p style="font-size: 14px;"><strong>Description:</strong> {disease_desc}</p><p style="font-size: 14px;"><strong>Treatment:</strong> {disease_treatment}</p><p style="font-size: 14px;"><strong>Common symptoms:</strong> {disease_symptoms_str}</p><p style="font-size: 14px;"><strong>Contagious to humans:</strong> {disease_contagious}</p></div>'
+
     return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PawScan AI — Health Report for {pet_name or "Pet"}</title>
 <style>
 body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; color: #333; }}
@@ -417,27 +390,19 @@ body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; margin:
 .header h1 {{ margin: 0; font-size: 28px; }} .header p {{ margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; }}
 .section {{ padding: 25px 30px; border-bottom: 1px solid #f0f0f0; }}
 .section h2 {{ font-size: 18px; color: #2c3e50; margin: 0 0 15px 0; border-left: 4px solid #667eea; padding-left: 10px; }}
-.pet-info {{ display: flex; flex-wrap: wrap; gap: 15px; }}
-.pet-info-item {{ flex: 1; min-width: 120px; }}
-.pet-info-label {{ font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }}
-.pet-info-value {{ font-size: 16px; font-weight: 600; margin-top: 2px; }}
+.pet-info {{ display: flex; flex-wrap: wrap; gap: 15px; }} .pet-info-item {{ flex: 1; min-width: 120px; }}
+.pet-info-label {{ font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; }} .pet-info-value {{ font-size: 16px; font-weight: 600; margin-top: 2px; }}
 .result-grid {{ display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }}
-.result-photo {{ flex: 0 0 300px; }} .result-photo img {{ width: 100%; border-radius: 8px; }}
-.result-details {{ flex: 1; min-width: 250px; }}
+.result-photo {{ flex: 0 0 300px; }} .result-photo img {{ width: 100%; border-radius: 8px; }} .result-details {{ flex: 1; min-width: 250px; }}
 .score-circle {{ width: 120px; height: 120px; border-radius: 50%; border: 8px solid {score_color}; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px auto; }}
-.score-number {{ font-size: 36px; font-weight: bold; color: {score_color}; }}
-.score-label {{ text-align: center; font-size: 14px; color: #666; }}
+.score-number {{ font-size: 36px; font-weight: bold; color: {score_color}; }} .score-label {{ text-align: center; font-size: 14px; color: #666; }}
 .triage-badge {{ display: inline-block; padding: 6px 20px; border-radius: 20px; font-size: 14px; font-weight: bold; color: white; background: {triage_color}; margin-bottom: 10px; }}
-.condition-name {{ font-size: 22px; font-weight: bold; margin: 5px 0; }}
-.confidence {{ font-size: 14px; color: #666; }}
-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-th {{ text-align: left; padding: 8px; background: #f8f9fa; border-bottom: 2px solid #ddd; font-size: 13px; }}
+.condition-name {{ font-size: 22px; font-weight: bold; margin: 5px 0; }} .confidence {{ font-size: 14px; color: #666; }}
+table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }} th {{ text-align: left; padding: 8px; background: #f8f9fa; border-bottom: 2px solid #ddd; font-size: 13px; }}
 ul {{ margin: 8px 0; padding-left: 20px; }} li {{ margin-bottom: 6px; font-size: 14px; }}
 .disclaimer {{ background: #fff3cd; padding: 15px 30px; font-size: 12px; color: #856404; }}
 .footer {{ padding: 20px 30px; text-align: center; font-size: 12px; color: #999; }}
-</style>
-</head>
-<body><div class="container">
+</style></head><body><div class="container">
 <div class="header"><h1>🐾 PawScan AI — Health Report</h1><p>Generated on {report_datetime}</p></div>
 <div class="section"><h2>Pet Information</h2><div class="pet-info">
 <div class="pet-info-item"><div class="pet-info-label">Name</div><div class="pet-info-value">{pet_name or "Unnamed"}</div></div>
@@ -449,8 +414,7 @@ ul {{ margin: 8px 0; padding-left: 20px; }} li {{ margin-bottom: 6px; font-size:
 </div></div>
 <div class="section"><h2>Scan Results</h2><div class="result-grid">
 <div class="result-photo"><img src="data:image/png;base64,{img_b64}" alt="Pet Photo"></div>
-<div class="result-details">
-<div class="score-circle"><div class="score-number">{score}</div></div>
+<div class="result-details"><div class="score-circle"><div class="score-number">{score}</div></div>
 <div class="score-label">Health Score (out of 100)</div>
 <div style="margin-top: 15px;"><div class="triage-badge">{triage}</div>
 <div class="condition-name">{result["display_name"]}</div>
@@ -473,24 +437,16 @@ ul {{ margin: 8px 0; padding-left: 20px; }} li {{ margin-bottom: 6px; font-size:
 <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Home Care Tips</h3><ul>{home_care_html}</ul>
 <h3 style="font-size: 15px; color: #2c3e50; margin: 15px 0 5px 0;">Watch For</h3><ul>{watch_for_html}</ul>
 </div>
-""" + (f"""<div class="section"><h2>Disease Information</h2>
-<p style="font-size: 14px;"><strong>Condition:</strong> {result["display_name"]}</p>
-<p style="font-size: 14px;"><strong>Description:</strong> {disease_desc}</p>
-<p style="font-size: 14px;"><strong>Treatment:</strong> {disease_treatment}</p>
-<p style="font-size: 14px;"><strong>Common symptoms:</strong> {disease_symptoms_str}</p>
-<p style="font-size: 14px;"><strong>Contagious to humans:</strong> {disease_contagious}</p>
-</div>""" if disease_desc else "") + f"""
+{disease_section}
 <div class="disclaimer"><strong>Disclaimer:</strong> {care_plan.get("disclaimer", "This AI assessment is preliminary and not a substitute for professional veterinary diagnosis. Always consult a licensed veterinarian.")}</div>
 <div class="footer">PawScan AI — AI-Powered Pet Health Assessment<br>Report generated on {report_datetime} | Powered by EfficientNet-B0 + Llama 3.3 70B</div>
 </div></body></html>"""
 
 
 def generate_text_report(result, score, breakdown, care_plan, pet_info):
-    """Generate a plain text report."""
     symptoms = pet_info.get("symptoms", [])
     symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
     triage = care_plan.get("triage", "ROUTINE")
-
     report = f"""PAWSCAN AI — PET HEALTH REPORT
 ================================
 Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -516,7 +472,6 @@ ALL CONDITION PROBABILITIES
 """
     for cls, prob in sorted(result["all_probabilities"].items(), key=lambda x: x[1], reverse=True):
         report += f"{cls}: {prob*100:.1f}%\n"
-
     report += f"""
 HEALTH SCORE BREAKDOWN
 ----------------------
@@ -577,54 +532,56 @@ def main():
     # ─── SIDEBAR ─────────────────────────────────────────────
     st.sidebar.markdown("### 🐾 PawScan AI")
     st.sidebar.markdown("---")
-
     st.sidebar.markdown("#### Pet Profile")
     pet_name = st.sidebar.text_input("Pet Name", value="", placeholder="e.g. Bruno")
     pet_species = st.sidebar.selectbox("Species", ["Dog", "Cat"])
     pet_breed = st.sidebar.text_input("Breed", value="", placeholder="e.g. Labrador")
     pet_age = st.sidebar.number_input("Age (years)", min_value=0.0, max_value=30.0, value=3.0, step=0.5)
     pet_weight = st.sidebar.number_input("Weight (kg)", min_value=0.0, max_value=100.0, value=15.0, step=0.5)
-
     st.sidebar.markdown("---")
-
     page = st.sidebar.radio("Navigate", ["🔍 New Scan", "📋 Scan History", "ℹ️ About"])
-
     auto_api_key = get_api_key()
+
+    # ═════════════════════════════════════════════════════════
+    # CHECK FOR HISTORY SCAN VIEWING — runs before page routing
+    # so it works regardless of which sidebar page is selected
+    # ═════════════════════════════════════════════════════════
+    if st.session_state.viewing_history_scan is not None:
+        scan_data = st.session_state.viewing_history_scan
+        st.markdown(f"#### 📋 Viewing Scan from {scan_data.get('timestamp', 'History')}")
+
+        display_scan_results(scan_data, disease_info, predictor, show_download=True)
+
+        st.markdown("---")
+        col_b1, col_b2, col_b3 = st.columns([1, 2, 1])
+        with col_b2:
+            if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
+                st.session_state.viewing_history_scan = None
+                st.rerun()
+            if st.button("← Back to History", use_container_width=True):
+                st.session_state.viewing_history_scan = None
+                st.rerun()
+        return
 
     # ─── NEW SCAN PAGE ───────────────────────────────────────
     if page == "🔍 New Scan":
 
-        # ── Check if viewing a history scan ──
-        if st.session_state.viewing_history_scan is not None:
-            scan_data = st.session_state.viewing_history_scan
-            display_scan_results(scan_data, disease_info, predictor, show_download=True)
-
-            st.markdown("---")
-            col_back1, col_back2, col_back3 = st.columns([1, 2, 1])
-            with col_back2:
-                if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
-                    st.session_state.viewing_history_scan = None
-                    st.rerun()
-            return
-
-        # ── If we have a current scan, show it ──
+        # If we have a current scan, show it (persists across page navigation)
         if st.session_state.current_scan is not None:
             scan_data = st.session_state.current_scan
             display_scan_results(scan_data, disease_info, predictor, show_download=True)
 
             st.markdown("---")
-            col_new1, col_new2, col_new3 = st.columns([1, 2, 1])
-            with col_new2:
+            col_n1, col_n2, col_n3 = st.columns([1, 2, 1])
+            with col_n2:
                 if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
-                    clear_current_scan()
+                    st.session_state.current_scan = None
                     st.rerun()
             return
 
-        # ── Upload + Scan form ──
+        # Upload + Scan form
         st.markdown("### Upload a Photo of Your Pet")
         st.markdown("Take or upload a clear photo of your pet's skin area. The AI will analyze it for common skin conditions.")
-
-        # Photo guidance
         st.info(
             "📸 **Photo Tips for Best Results:**\n"
             "- Take a **close-up** of the affected skin area (not a full body shot)\n"
@@ -637,23 +594,19 @@ def main():
 
         with col_upload:
             uploaded_file = st.file_uploader(
-                "Choose an image...",
-                type=['jpg', 'jpeg', 'png'],
+                "Choose an image...", type=['jpg', 'jpeg', 'png'],
                 help="JPG or PNG. Best results with close-up, well-lit photos of the skin area."
             )
             if uploaded_file:
-                image = Image.open(uploaded_file)
+                image = Image.open(uploaded_file).convert("RGB")
                 st.image(image, caption="Uploaded Photo", use_container_width=True)
 
         with col_info:
             st.markdown("#### Reported Symptoms")
             st.markdown("Select any symptoms you've noticed:")
-            symptoms = st.multiselect(
-                "Symptoms", SYMPTOM_OPTIONS, default=["None"], label_visibility="collapsed"
-            )
+            symptoms = st.multiselect("Symptoms", SYMPTOM_OPTIONS, default=["None"], label_visibility="collapsed")
             if "None" in symptoms and len(symptoms) > 1:
                 symptoms = [s for s in symptoms if s != "None"]
-
             st.markdown("")
 
             if auto_api_key:
@@ -676,7 +629,7 @@ def main():
             if scan_clicked:
                 with st.spinner("🤖 AI is analyzing your pet's photo..."):
                     time.sleep(0.5)
-                    image = Image.open(uploaded_file)
+                    image = Image.open(uploaded_file).convert("RGB")
                     result = predictor.predict(image)
 
                     score, breakdown = calculate_health_score(
@@ -691,23 +644,26 @@ def main():
                         api_key=api_key if 'api_key' in locals() else auto_api_key
                     )
 
-                    # Store in session state
+                    # Store in session state — use base64 for image (avoids PIL format issues)
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    pet_info_dict = {
+                        "name": pet_name, "species": pet_species, "breed": pet_breed,
+                        "age": pet_age, "weight": pet_weight, "symptoms": symptoms
+                    }
+
                     st.session_state.current_scan = {
-                        "image": image,
+                        "image_b64": image_to_b64(image, max_size=800, fmt="JPEG", quality=85),
                         "result": result,
                         "score": score,
                         "breakdown": breakdown,
                         "care_plan": care_plan,
-                        "pet_info": {
-                            "name": pet_name, "species": pet_species, "breed": pet_breed,
-                            "age": pet_age, "weight": pet_weight, "symptoms": symptoms
-                        },
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                        "pet_info": pet_info_dict,
+                        "timestamp": timestamp
                     }
 
-                    # Save to history with image
+                    # Save to history
                     history_entry = {
-                        "timestamp": st.session_state.current_scan["timestamp"],
+                        "timestamp": timestamp,
                         "pet_name": pet_name or "Unnamed",
                         "species": pet_species,
                         "predicted_class": result["predicted_class"],
@@ -720,12 +676,9 @@ def main():
                         "score": score,
                         "breakdown": breakdown,
                         "care_plan": care_plan,
-                        "pet_info": {
-                            "name": pet_name, "species": pet_species, "breed": pet_breed,
-                            "age": pet_age, "weight": pet_weight, "symptoms": symptoms
-                        }
+                        "pet_info": pet_info_dict
                     }
-                    save_history_with_image(history_entry, image)
+                    save_history_entry(history_entry, image)
 
                 st.rerun()
         else:
@@ -741,7 +694,6 @@ def main():
         if not history:
             st.info("No scans yet. Run your first scan from the 'New Scan' page!")
         else:
-            # Health score trend chart
             if len(history) > 1:
                 st.markdown("#### 📈 Health Score Trend")
                 scores = [h["health_score"] for h in history]
@@ -757,18 +709,16 @@ def main():
                 )
                 st.plotly_chart(trend_fig, use_container_width=True)
 
-            # Scan list — clickable cards
             st.markdown("#### 📝 All Scans (Click to View Details)")
 
             for i, entry in enumerate(reversed(history)):
-                idx = len(history) - i  # Display number
+                idx = len(history) - i
                 col_thumb, col_info, col_btn = st.columns([1, 3, 1])
 
                 with col_thumb:
                     if "image_b64" in entry:
                         try:
-                            img_data = base64.b64decode(entry["image_b64"])
-                            img = Image.open(BytesIO(img_data))
+                            img = b64_to_image(entry["image_b64"])
                             st.image(img, width=80)
                         except:
                             st.markdown("🐾")
@@ -783,9 +733,9 @@ def main():
 
                 with col_btn:
                     if st.button("View", key=f"view_{i}", use_container_width=True):
-                        # Load the full scan data for viewing
+                        # Load full scan data for viewing
                         st.session_state.viewing_history_scan = {
-                            "image": Image.open(BytesIO(base64.b64decode(entry["image_b64"]))) if "image_b64" in entry else None,
+                            "image_b64": entry.get("image_b64"),
                             "result": entry.get("result", {}),
                             "score": entry.get("score", entry.get("health_score", 0)),
                             "breakdown": entry.get("breakdown", {}),
@@ -798,8 +748,6 @@ def main():
                             }),
                             "timestamp": entry.get("timestamp", "")
                         }
-                        # Navigate to New Scan page to display it
-                        st.session_state.current_scan = None
                         st.rerun()
 
                 st.markdown("---")
