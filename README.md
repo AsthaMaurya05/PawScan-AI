@@ -10,7 +10,7 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
 
 ## 🔗 Live Demo
 <!-- Add your Streamlit Cloud URL here after deployment -->
-**[Try PawScan AI →](https://your-app-url.streamlit.app)**
+**[Try PawScan AI →](https://pawscan-ai-c97uemqj6c23f5jvvppavl.streamlit.app/)**
 
 ---
 
