@@ -1,0 +1,35 @@
+{
+  "class_names": [
+    "Dermatitis",
+    "Fungal_infections",
+    "Healthy",
+    "Hypersensitivity",
+    "demodicosis",
+    "ringworm"
+  ],
+  "class_to_idx": {
+    "Dermatitis": 0,
+    "Fungal_infections": 1,
+    "Healthy": 2,
+    "Hypersensitivity": 3,
+    "demodicosis": 4,
+    "ringworm": 5
+  },
+  "idx_to_class": {
+    "0": "Dermatitis",
+    "1": "Fungal_infections",
+    "2": "Healthy",
+    "3": "Hypersensitivity",
+    "4": "demodicosis",
+    "5": "ringworm"
+  },
+  "display_names": {
+    "demodicosis": "Demodicosis (Mange Mites)",
+    "ringworm": "Ringworm (Dermatophytosis)",
+    "Dermatitis": "Dermatitis (Skin Inflammation)",
+    "Fungal_infections": "Fungal Infection",
+    "Healthy": "Healthy",
+    "Hypersensitivity": "Hypersensitivity (Allergic Reaction)"
+  },
+  "img_size": 224
+}

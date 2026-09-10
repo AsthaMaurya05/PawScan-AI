@@ -1,0 +1,86 @@
+{
+  "Dermatitis": {
+    "severity": "moderate",
+    "description": "Inflammation of the skin causing redness, itching, and discomfort. Can be caused by allergies, irritants, or infections.",
+    "vet_urgency": "non-urgent",
+    "display_name": "Dermatitis (Skin Inflammation)",
+    "common_symptoms": [
+      "Redness",
+      "Itching",
+      "Swelling",
+      "Hair loss",
+      "Scaly or crusty skin"
+    ],
+    "treatment_approach": "Anti-inflammatory medication, medicated shampoos, identifying and removing the trigger cause.",
+    "contagious_to_humans": false
+  },
+  "Fungal_infections": {
+    "severity": "moderate",
+    "description": "Various fungal skin infections that can cause hair loss, scaling, and discomfort. May spread if untreated.",
+    "vet_urgency": "non-urgent",
+    "display_name": "Fungal Infection",
+    "common_symptoms": [
+      "Hair loss",
+      "Scaling",
+      "Crusting",
+      "Itching",
+      "Circular lesions"
+    ],
+    "treatment_approach": "Antifungal medication (topical and/or oral), medicated baths, environmental cleaning.",
+    "contagious_to_humans": true
+  },
+  "Healthy": {
+    "severity": "none",
+    "description": "No visible skin abnormalities detected. The skin appears normal and healthy.",
+    "vet_urgency": "routine",
+    "display_name": "Healthy",
+    "common_symptoms": [],
+    "treatment_approach": "Continue regular grooming, balanced diet, and routine veterinary check-ups.",
+    "contagious_to_humans": false
+  },
+  "Hypersensitivity": {
+    "severity": "mild",
+    "description": "An allergic skin reaction caused by environmental allergens, food, or flea bites. Results in itching and discomfort.",
+    "vet_urgency": "non-urgent",
+    "display_name": "Hypersensitivity (Allergic Reaction)",
+    "common_symptoms": [
+      "Itching",
+      "Redness",
+      "Hives",
+      "Excessive scratching",
+      "Ear inflammation"
+    ],
+    "treatment_approach": "Identify and avoid allergens, antihistamines, hypoallergenic diet, flea prevention.",
+    "contagious_to_humans": false
+  },
+  "demodicosis": {
+    "severity": "severe",
+    "description": "A skin condition caused by Demodex mites that live in hair follicles. Can lead to hair loss and secondary infections.",
+    "vet_urgency": "urgent",
+    "display_name": "Demodicosis (Mange Mites)",
+    "common_symptoms": [
+      "Patchy hair loss",
+      "Skin thickening",
+      "Itching",
+      "Redness",
+      "Greasy skin"
+    ],
+    "treatment_approach": "Acaricidal treatment (oral or topical), medicated dips, treating secondary infections.",
+    "contagious_to_humans": false
+  },
+  "ringworm": {
+    "severity": "severe",
+    "description": "A contagious fungal infection that causes circular, hairless lesions. Highly transmissible to other animals and humans.",
+    "vet_urgency": "urgent",
+    "display_name": "Ringworm (Dermatophytosis)",
+    "common_symptoms": [
+      "Circular hairless patches",
+      "Scaly skin",
+      "Redness",
+      "Itching",
+      "Brittle hair"
+    ],
+    "treatment_approach": "Antifungal medication (oral and topical), environmental disinfection, isolate from other pets.",
+    "contagious_to_humans": true
+  }
+}
