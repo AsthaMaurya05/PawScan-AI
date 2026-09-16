@@ -3,11 +3,17 @@ app.py — PawScan AI Streamlit Web Application
 ================================================
 Features:
   - Disease detection (EfficientNet-B0)
+  - Grad-CAM explainability (see WHERE the model looked)
   - Health score engine (0-100)
   - LLM care recommendations (Groq Llama 3.3 70B)
   - Session state management (results persist across page navigation)
   - Clickable scan history (view past scan details)
   - Downloadable reports (HTML + Text)
+
+PRIVACY NOTE:
+  Scan history is stored per browser session (st.session_state), never in a
+  server-side file shared across users. See the comment on the history
+  functions below, and the "Scaling & Privacy" section of the README.
 """
 
 import os
@@ -33,12 +39,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from predict import PawScanPredictor
 from health_score import calculate_health_score
 from llm_advisor import generate_care_plan
+from gradcam import PawScanGradCAM
 
 # ─── CONSTANTS ───────────────────────────────────────────────
 MODEL_PATH = "models/pawscan_model.pth"
 CLASS_NAMES_PATH = "class_names.json"
 DISEASE_INFO_PATH = "data/disease_info.json"
-HISTORY_FILE = "scan_history.json"
 
 SYMPTOM_OPTIONS = [
     "None", "Itching", "Hair loss", "Redness", "Excessive scratching",
@@ -88,10 +94,24 @@ def get_api_key():
 @st.cache_resource
 def load_model():
     try:
-        return PawScanPredictor(MODEL_PATH, CLASS_NAMES_PATH)
+        return PawScanPredictor(
+            MODEL_PATH, CLASS_NAMES_PATH, disease_info_path=DISEASE_INFO_PATH
+        )
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         return None
+
+
+@st.cache_resource
+def load_gradcam(_predictor):
+    """Build the Grad-CAM explainer once per app process.
+
+    The argument is prefixed with an underscore because Streamlit cannot
+    hash arbitrary objects like PawScanPredictor — and caching by the
+    predictor's identity is unnecessary since the predictor itself is a
+    cached resource (stable for the lifetime of the app process).
+    """
+    return PawScanGradCAM(_predictor)
 
 
 @st.cache_data
@@ -103,17 +123,27 @@ def load_disease_info():
         return {}
 
 
+# ─── SCAN HISTORY (SESSION-SCOPED) ────────────────────────────
+# PRIVACY: History lives in st.session_state (per browser session), NOT in a
+# file on the server. The previous implementation wrote every scan — including
+# base64 pet photos, pet names, weights and symptoms — to a single
+# scan_history.json on disk. On a shared deployment (e.g. Streamlit Community
+# Cloud) every visitor read from and wrote to that SAME file:
+#   1. Cross-user data leak — anyone opening "Scan History" saw every other
+#      user's pet photos and medical details.
+#   2. Corruption risk — concurrent writes from multiple sessions could
+#      clobber or truncate the file.
+# Session-scoped storage isolates each user completely. For true multi-user
+# persistence you would add authentication and a per-user database (see
+# README "Scaling & Privacy").
 def load_history():
-    try:
-        with open(HISTORY_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    if "history" not in st.session_state:
+        st.session_state.history = []
+    return st.session_state.history
 
 
 def save_history(history):
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump(history, f, indent=2)
+    st.session_state.history = history
 
 
 def save_history_entry(history_entry, image):
@@ -217,13 +247,23 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
     with col1:
         st.markdown("#### 📸 Photo")
         if image is not None:
-            st.image(image, use_container_width=True)
+            st.image(image, width="stretch")
         else:
             st.markdown("🐾 *Photo not available*")
 
+        # Grad-CAM explainability overlay (if generated for this scan)
+        gradcam_b64 = scan_data.get("gradcam_b64")
+        if gradcam_b64:
+            try:
+                gc_img = b64_to_image(gradcam_b64)
+                st.image(gc_img, caption="🔍 AI focus areas (Grad-CAM) — where the model looked",
+                         width="stretch")
+            except Exception:
+                pass
+
     with col2:
         st.markdown("#### 💯 Health Score")
-        st.plotly_chart(plot_health_gauge(score), use_container_width=True)
+        st.plotly_chart(plot_health_gauge(score), width="stretch")
         status_level = breakdown["status_level"]
         if status_level == "good":
             st.success(breakdown["status"])
@@ -305,14 +345,15 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
                 care_plan=care_plan, pet_name=pet_info.get("name", ""),
                 pet_species=pet_info.get("species", "Dog"), pet_breed=pet_info.get("breed", ""),
                 pet_age=pet_info.get("age", 3), pet_weight=pet_info.get("weight", 15),
-                symptoms=pet_info.get("symptoms", []), disease_info=disease_info
+                symptoms=pet_info.get("symptoms", []), disease_info=disease_info,
+                gradcam_b64=scan_data.get("gradcam_b64")
             )
             pet_name_clean = (pet_info.get("name", "pet") or "pet").replace(" ", "_")
             st.download_button(
                 label="📥 Download Full Report (HTML)",
                 data=html_report.encode("utf-8"),
                 file_name=f"pawscan_report_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                mime="text/html", use_container_width=True
+                mime="text/html", width="stretch"
             )
 
         text_report = generate_text_report(
@@ -323,7 +364,7 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
             label="📝 Download Summary (Text)",
             data=text_report.encode("utf-8"),
             file_name=f"pawscan_summary_{pet_name_clean}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-            mime="text/plain", use_container_width=True
+            mime="text/plain", width="stretch"
         )
 
     if result["is_healthy"] and score >= 80:
@@ -333,10 +374,11 @@ def display_scan_results(scan_data, disease_info, predictor, show_download=True)
 # ─── REPORT GENERATION ───────────────────────────────────────
 def generate_html_report(image, result, score, breakdown, care_plan,
                          pet_name, pet_species, pet_breed, pet_age,
-                         pet_weight, symptoms, disease_info):
+                         pet_weight, symptoms, disease_info, gradcam_b64=None):
     """Generate a self-contained HTML report."""
     img_b64 = image_to_b64(image, fmt="PNG")
-    symptoms_str = ", ".join(symptoms) if symptoms and "None" not in symptoms else "No symptoms reported"
+    real_symptoms = [s for s in (symptoms or []) if s.strip() and s.strip().lower() != "none"]
+    symptoms_str = ", ".join(real_symptoms) if real_symptoms else "No symptoms reported"
 
     triage = care_plan.get("triage", "ROUTINE")
     triage_colors_map = {"URGENT": "#e74c3c", "NON-URGENT": "#f39c12", "ROUTINE": "#2ecc71"}
@@ -375,6 +417,16 @@ def generate_html_report(image, result, score, breakdown, care_plan,
         components_html += f'<tr><td style="padding: 8px; border-bottom: 1px solid #eee;">{component}</td><td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right; font-weight: bold;">{points:.0f} / {max_pts}</td></tr>'
 
     report_datetime = datetime.now().strftime("%Y-%m-%d at %H:%M")
+
+    gradcam_section = ""
+    if gradcam_b64:
+        gradcam_section = (
+            '<div class="section"><h2>AI Focus Areas (Grad-CAM)</h2>'
+            '<p style="font-size: 13px; color: #666; margin-bottom: 10px;">'
+            'The heatmap shows which regions of the photo most influenced the model\'s decision '
+            '(red = high influence, blue = low influence).</p>'
+            f'<div class="result-photo"><img src="data:image/jpeg;base64,{gradcam_b64}" alt="Grad-CAM overlay" style="border: 1px solid #eee;"></div></div>'
+        )
 
     disease_section = ""
     if disease_desc:
@@ -420,6 +472,7 @@ ul {{ margin: 8px 0; padding-left: 20px; }} li {{ margin-bottom: 6px; font-size:
 <div class="condition-name">{result["display_name"]}</div>
 <div class="confidence">Confidence: {result["confidence_pct"]:.1f}% | Severity: {result["severity"].title()}</div></div>
 </div></div></div>
+{gradcam_section}
 <div class="section"><h2>AI Detection — All Conditions</h2>{prob_bars_html}</div>
 <div class="section"><h2>Health Score Breakdown</h2>
 <table><thead><tr><th>Component</th><th style="text-align: right;">Score</th></tr></thead><tbody>
@@ -555,10 +608,10 @@ def main():
         st.markdown("---")
         col_b1, col_b2, col_b3 = st.columns([1, 2, 1])
         with col_b2:
-            if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
+            if st.button("🔄 Start New Scan", width="stretch", type="primary"):
                 st.session_state.viewing_history_scan = None
                 st.rerun()
-            if st.button("← Back to History", use_container_width=True):
+            if st.button("← Back to History", width="stretch"):
                 st.session_state.viewing_history_scan = None
                 st.rerun()
         return
@@ -574,7 +627,7 @@ def main():
             st.markdown("---")
             col_n1, col_n2, col_n3 = st.columns([1, 2, 1])
             with col_n2:
-                if st.button("🔄 Start New Scan", use_container_width=True, type="primary"):
+                if st.button("🔄 Start New Scan", width="stretch", type="primary"):
                     st.session_state.current_scan = None
                     st.rerun()
             return
@@ -598,8 +651,13 @@ def main():
                 help="JPG or PNG. Best results with close-up, well-lit photos of the skin area."
             )
             if uploaded_file:
-                image = Image.open(uploaded_file).convert("RGB")
-                st.image(image, caption="Uploaded Photo", use_container_width=True)
+                try:
+                    image = Image.open(uploaded_file).convert("RGB")
+                except Exception:
+                    image = None
+                    st.error("⚠️ Could not read that file. Please upload a valid JPG or PNG photo.")
+                if image is not None:
+                    st.image(image, caption="Uploaded Photo", width="stretch")
 
         with col_info:
             st.markdown("#### Reported Symptoms")
@@ -624,13 +682,28 @@ def main():
         if uploaded_file:
             col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
             with col_btn2:
-                scan_clicked = st.button("🔍 Scan Now", use_container_width=True, type="primary")
+                scan_clicked = st.button("🔍 Scan Now", width="stretch", type="primary")
 
             if scan_clicked:
+                try:
+                    image = Image.open(uploaded_file).convert("RGB")
+                except Exception:
+                    st.error("⚠️ Could not read that file. Please upload a valid JPG or PNG photo and try again.")
+                    st.stop()
                 with st.spinner("🤖 AI is analyzing your pet's photo..."):
                     time.sleep(0.5)
-                    image = Image.open(uploaded_file).convert("RGB")
                     result = predictor.predict(image)
+
+                    # Grad-CAM explainability — show WHERE the model looked.
+                    # Non-fatal: a failure here must never block the scan.
+                    gradcam_b64 = None
+                    try:
+                        gradcam = load_gradcam(predictor)
+                        cam, _ = gradcam.generate(image)
+                        overlay = gradcam.overlay(image, cam)
+                        gradcam_b64 = image_to_b64(overlay, max_size=400, fmt="JPEG", quality=80)
+                    except Exception as e:
+                        print(f"Grad-CAM failed (non-fatal): {e}")
 
                     score, breakdown = calculate_health_score(
                         prediction_result=result, pet_species=pet_species,
@@ -641,7 +714,7 @@ def main():
                         prediction=result, pet_species=pet_species,
                         pet_breed=pet_breed or "Unknown", pet_age=pet_age,
                         pet_weight=pet_weight, symptoms=symptoms,
-                        api_key=api_key if 'api_key' in locals() else auto_api_key
+                        api_key=api_key
                     )
 
                     # Store in session state — use base64 for image (avoids PIL format issues)
@@ -658,6 +731,7 @@ def main():
                         "breakdown": breakdown,
                         "care_plan": care_plan,
                         "pet_info": pet_info_dict,
+                        "gradcam_b64": gradcam_b64,
                         "timestamp": timestamp
                     }
 
@@ -676,7 +750,8 @@ def main():
                         "score": score,
                         "breakdown": breakdown,
                         "care_plan": care_plan,
-                        "pet_info": pet_info_dict
+                        "pet_info": pet_info_dict,
+                        "gradcam_b64": gradcam_b64
                     }
                     save_history_entry(history_entry, image)
 
@@ -688,6 +763,8 @@ def main():
     elif page == "📋 Scan History":
         st.markdown("### 📋 Scan History")
         st.markdown("Track your pet's health over time — click on any scan to view full details.")
+        st.caption("🔒 History is stored only in your current browser session — it is never written to a "
+                   "shared file on the server, so no other user can ever see your scans.")
 
         history = load_history()
 
@@ -707,7 +784,7 @@ def main():
                     yaxis=dict(range=[0, 100]), height=300,
                     margin=dict(l=20, r=20, t=20, b=20)
                 )
-                st.plotly_chart(trend_fig, use_container_width=True)
+                st.plotly_chart(trend_fig, width="stretch")
 
             st.markdown("#### 📝 All Scans (Click to View Details)")
 
@@ -732,7 +809,7 @@ def main():
                                 f"💯 Score: {entry['health_score']}/100")
 
                 with col_btn:
-                    if st.button("View", key=f"view_{i}", use_container_width=True):
+                    if st.button("View", key=f"view_{i}", width="stretch"):
                         # Load full scan data for viewing
                         st.session_state.viewing_history_scan = {
                             "image_b64": entry.get("image_b64"),
@@ -740,6 +817,7 @@ def main():
                             "score": entry.get("score", entry.get("health_score", 0)),
                             "breakdown": entry.get("breakdown", {}),
                             "care_plan": entry.get("care_plan", {}),
+                            "gradcam_b64": entry.get("gradcam_b64"),
                             "pet_info": entry.get("pet_info", {
                                 "name": entry.get("pet_name", ""),
                                 "species": entry.get("species", "Dog"),
@@ -759,15 +837,18 @@ def main():
     # ─── ABOUT PAGE ───────────────────────────────────────────
     elif page == "ℹ️ About":
         st.markdown("### ℹ️ About PawScan AI")
-        st.markdown("""
-        **PawScan AI** is an AI-powered pet health assessment platform that detects common skin conditions in pets from a single photo.
+        st.markdown("""**PawScan AI** is an AI-powered pet health assessment platform that detects common skin conditions in pets from a single photo.
 
-        #### How It Works
-        1. **Upload** a close-up photo of your pet's skin area
-        2. **AI Detection** — An EfficientNet-B0 model analyzes the image for 6 skin conditions
-        3. **Health Score** — A 0-100 score is calculated from scan results + symptoms + pet metadata
-        4. **Care Plan** — Get AI-generated recommendations for next steps and home care
-        5. **Download Report** — Save the full results as an HTML or text file
+#### How It Works
+1. **Upload** a close-up photo of your pet's skin area
+2. **AI Detection** — An EfficientNet-B0 model analyzes the image for 6 skin conditions
+3. **Explainability** — A Grad-CAM heatmap shows exactly which regions of the photo drove the model's decision (no black-box predictions)
+4. **Health Score** — A 0-100 score is calculated from scan results + symptoms + pet metadata
+5. **Care Plan** — Get AI-generated recommendations for next steps and home care
+6. **Download Report** — Save the full results as an HTML or text file
+
+#### 🔒 Privacy
+Your scans (photos, pet details and results) are kept **only in your browser session** — they are never written to a shared file on the server, and no other user can see them. For authenticated multi-user deployments, each user's history would live in their own database record (see README → *Scaling & Privacy*).
 
         #### 📸 Photo Tips for Best Results
         - Take a **close-up** of the affected skin area (not a full body shot)
@@ -785,6 +866,7 @@ def main():
 
         #### Technology
         - **Model:** EfficientNet-B0 (transfer learning from ImageNet)
+        - **Explainability:** Grad-CAM (Selvaraju et al., 2017) on the final convolutional feature map
         - **Framework:** PyTorch
         - **LLM:** Groq Llama 3.3 70B for care recommendations
         - **Dataset:** 4,300+ labeled pet skin disease images

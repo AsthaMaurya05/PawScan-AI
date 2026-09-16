@@ -13,6 +13,8 @@ USAGE:
 """
 
 import json
+import os
+
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -23,11 +25,15 @@ import numpy as np
 class PawScanPredictor:
     """Load trained model and run inference on pet images."""
 
-    def __init__(self, model_path, class_names_path=None, device=None):
+    def __init__(self, model_path, class_names_path=None, device=None,
+                 disease_info_path=None):
         """
         Args:
             model_path: Path to pawscan_model.pth
             class_names_path: Path to class_names.json (optional, loaded from checkpoint if not provided)
+            device: torch device (defaults to CUDA if available)
+            disease_info_path: Path to data/disease_info.json (optional — used
+                to look up per-class severity instead of the fallback map)
         """
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -45,6 +51,28 @@ class PawScanPredictor:
             self.class_names = checkpoint.get("class_names", [])
             self.idx_to_class = checkpoint.get("idx_to_class", {})
             self.display_names = {}
+
+        # Per-class severity from disease_info.json when available, with a
+        # static fallback so inference never crashes if the file is missing.
+        self._severity_map = {}
+        if disease_info_path and os.path.exists(disease_info_path):
+            try:
+                with open(disease_info_path) as f:
+                    info = json.load(f)
+                self._severity_map = {
+                    cls: d.get("severity", "moderate") for cls, d in info.items()
+                }
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        self._default_severity_map = {
+            "Healthy": "none",
+            "Hypersensitivity": "mild",
+            "Dermatitis": "moderate",
+            "Fungal_infections": "moderate",
+            "demodicosis": "severe",
+            "ringworm": "severe"
+        }
 
         num_classes = len(self.class_names)
 
@@ -118,16 +146,11 @@ class PawScanPredictor:
             class_name = self.idx_to_class.get(i, str(i))
             all_probs[class_name] = round(float(prob), 4)
 
-        # Determine severity (from disease_info.json if available)
-        severity_map = {
-            "Healthy": "none",
-            "Hypersensitivity": "mild",
-            "Dermatitis": "moderate",
-            "Fungal_infections": "moderate",
-            "demodicosis": "severe",
-            "ringworm": "severe"
-        }
-        severity = severity_map.get(predicted_class, "moderate")
+        # Determine severity (prefer disease_info.json, fall back to static map)
+        severity = self._severity_map.get(
+            predicted_class,
+            self._default_severity_map.get(predicted_class, "moderate")
+        )
 
         result = {
             "predicted_class": predicted_class,
@@ -140,6 +163,3 @@ class PawScanPredictor:
         }
 
         return result
-
-
-import os  # needed for path check in __init__

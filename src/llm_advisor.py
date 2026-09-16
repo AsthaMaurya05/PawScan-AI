@@ -25,6 +25,16 @@ import json
 import requests
 
 
+def _format_symptoms(symptoms):
+    """Render the symptom selection for the LLM prompt.
+
+    Handles both UI labels ("Hair loss") and snake_case keys, and treats a
+    'None' selection as no symptoms.
+    """
+    real = [s for s in (symptoms or []) if s.strip() and s.strip().lower() != "none"]
+    return ", ".join(real) if real else "No symptoms reported"
+
+
 def generate_care_plan(prediction, pet_species="Dog", pet_breed="Unknown",
                        pet_age=None, pet_weight=None, symptoms=None,
                        api_key=None):
@@ -44,7 +54,7 @@ def generate_care_plan(prediction, pet_species="Dog", pet_breed="Unknown",
     severity = prediction.get("severity", "moderate")
     all_probs = prediction.get("all_probabilities", {})
 
-    symptoms_str = ", ".join(symptoms) if symptoms and "none" not in symptoms else "No symptoms reported"
+    symptoms_str = _format_symptoms(symptoms)
 
     prompt = f"""You are a veterinary AI assistant for PawScan AI, a pet health assessment platform.
 Based on the following AI scan results, provide a clear, structured care recommendation for the pet parent.

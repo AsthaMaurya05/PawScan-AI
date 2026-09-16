@@ -1,8 +1,17 @@
-torch
-torchvision
-streamlit
-pillow
-matplotlib
-plotly
-numpy
-requests
+# PawScan AI — Python dependencies
+# Python 3.9–3.12 (Streamlit Community Cloud's default image works out of the box)
+
+# streamlit >= 1.49 required for the width="stretch" layout API
+streamlit>=1.49
+
+# PyTorch — on Streamlit Cloud torch is preinstalled in the base image,
+# so this resolves quickly; locally on a GPU machine use the CUDA wheels
+# from https://pytorch.org if you want them.
+torch>=2.0
+torchvision>=0.15
+
+pillow>=10.0
+matplotlib>=3.8
+plotly>=5.18
+numpy>=1.24
+requests>=2.31

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Privacy: the legacy local scan-history file must NEVER be committed
+# (it contained user pet photos + medical data in the pre-fix version)
+scan_history.json
+
+# Secrets — never commit real keys
+.env
+.streamlit/secrets.toml
+
+# OS / editor noise
+.DS_Store
+.ipynb_checkpoints/

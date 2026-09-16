@@ -39,26 +39,49 @@ def _confidence_adjustment(confidence_pct):
         return -12     # Very low confidence
 
 # ─── SYMPTOM SCORING ──────────────────────────────────────────
+# Keys are normalized (lowercase snake_case) forms of the UI labels in app.py
+# so they always match regardless of how the caller spells them.
 SYMPTOM_SEVERITY = {
     "none": 0,
     "itching": 1,
-    "hair_loss": 1,
+    "hair_loss": 1,            # UI label: "Hair loss"
     "redness": 2,
-    "scratching": 1,
-    "lesions": 2,
-    "appetite_change": 2,
+    "scratching": 1,           # UI label: "Excessive scratching"
+    "excessive_scratching": 1,
+    "lesions": 2,              # UI label: "Visible lesions"
+    "visible_lesions": 2,
+    "appetite_change": 2,      # UI label: "Appetite change"
     "lethargy": 3,
     "bleeding": 3,
-    "weight_loss": 2,
-    "swelling": 2
+    "weight_loss": 2,          # UI label: "Weight loss"
+    "swelling": 2,
 }
+
+
+def _normalize_symptom(symptom):
+    """Normalize a symptom label to the canonical key used in SYMPTOM_SEVERITY.
+
+    Handles the UI labels from app.py ("Excessive scratching", "Hair loss")
+    as well as raw snake_case keys ("hair_loss").
+    """
+    key = symptom.strip().lower().replace(" ", "_").replace("-", "_")
+    return key
+
+
+def _is_no_symptoms(symptoms):
+    """True if the selection means 'no symptoms reported'."""
+    if not symptoms:
+        return True
+    normalized = [_normalize_symptom(s) for s in symptoms]
+    return all(s == "none" or s == "" for s in normalized)
+
 
 def _score_symptoms(symptoms):
     """Score user-reported symptoms. Max 20 points."""
-    if not symptoms or "none" in symptoms:
+    if _is_no_symptoms(symptoms):
         return 20, "No symptoms reported"
 
-    total_severity = sum(SYMPTOM_SEVERITY.get(s, 1) for s in symptoms)
+    total_severity = sum(SYMPTOM_SEVERITY.get(_normalize_symptom(s), 1) for s in symptoms)
     num_symptoms = len(symptoms)
 
     if total_severity == 0:

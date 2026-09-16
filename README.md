@@ -34,14 +34,18 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
 
 ## 🏗️ Architecture
 
-```
+```text
 ┌──────────┐     ┌──────────────┐     ┌───────────────────┐
 │ Pet Photo │────▶│ Preprocessing │────▶│ EfficientNet-B0   │
 │ Upload    │     │ (Resize 224,  │     │ 6-class classifier │
 │ (JPG/PNG) │     │  Normalize)   │     │ Transfer Learning  │
 └──────────┘     └──────────────┘     └────────┬──────────┘
-                                                 │
-                                                 ▼
+                                              │
+                     ┌────────────────────────┴──────────────┐
+                     │        Grad-CAM Explainability          │
+                     │  (heatmap of WHERE the model looked)    │
+                     └────────────────────────┬──────────────┘
+                                              ▼
 ┌──────────┐                    ┌──────────────────────────┐
 │ User Meta │──────────────────▶│    Health Score Engine    │
 │ (weight,  │                    │  Weighted: 60% + 20% + 20%│
@@ -62,8 +66,10 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
                             │     Streamlit Web App        │
                             │  - Health score gauge        │
                             │  - Probability bar chart     │
+                            │  - Grad-CAM heatmap overlay  │
                             │  - Care plan display         │
                             │  - Scan history + trend      │
+                            │    (session-scoped, private) │
                             └──────────────────────────────┘
 ```
 
@@ -78,48 +84,64 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
 ## 🛠️ Tech Stack
 
 | Component | Technology |
-|-----------|-----------|
+|-----------|------------|
 | Disease Detection | PyTorch + EfficientNet-B0 (transfer learning) |
+| Explainability | Grad-CAM (Selvaraju et al., 2017) on the final conv feature map |
 | Health Score | Custom weighted scoring algorithm |
 | LLM Care Plan | Groq Llama 3.3 70B (free API) |
 | Web App | Streamlit |
 | Deployment | Streamlit Community Cloud (free) |
 | Model Training | Kaggle Notebooks (free T4 GPU) |
 
-## 🚀 How to Run Locally
+## Explainability — Grad-CAM
 
-```bash
-# Clone the repo
-git clone https://github.com/AsthaMaurya05/PawScan-AI.git
-cd PawScan-AI
+"Black box, trust me" is the #1 objection to any health-related CV model, so every
+scan ships with a Grad-CAM heatmap showing exactly which regions of the photo
+drove the prediction:
 
-# Install dependencies
-pip install -r requirements.txt
+- **What it is:** the gradient of the predicted class score, global-average-pooled
+  over channels, combined with the final convolutional feature map (7×7×1280 for
+  a 224×224 input), ReLU'd, normalized and upscaled to the photo resolution.
+- **Where you see it:** under the photo on the results page, in scan history views,
+  and as a dedicated section in the downloadable HTML report.
+- **Why it matters:** if the model highlights the lesion, the prediction is
+  trustworthy; if it highlights fur or background, the user knows to treat the
+  result with skepticism. This turns the model's failure modes into visible,
+  actionable information for the pet parent.
 
-# Place model file
-# Download pawscan_model.pth and place it in models/
+## Scaling & Privacy
 
-# Run the app
-streamlit run app.py
-```
+**The problem this project fixed:** the first version stored every scan — pet
+photos (embedded as base64), names, weights, symptoms and results — in a single
+`scan_history.json` written to the server's disk. On a shared deployment every
+visitor read from and wrote to that *same* file, meaning:
 
-## 📁 Project Structure
+1. **Cross-user data leak** — anyone opening "Scan History" saw every other
+   user's pet photos and medical details.
+2. **Corruption risk** — concurrent writes from simultaneous sessions could
+   clobber or truncate the file.
 
-```
-PawScan-AI/
-├── app.py                     # Streamlit web app (main entry point)
-├── src/
-│   ├── predict.py             # Inference pipeline
-│   ├── health_score.py        # Health scoring algorithm
-│   └── llm_advisor.py         # Groq LLM integration
-├── data/
-│   └── disease_info.json      # Disease information database
-├── models/
-│   └── pawscan_model.pth      # Trained model weights
-├── class_names.json           # Class label mapping
-├── requirements.txt
-└── README.md
-```
+**Current design:** scan history is stored in `st.session_state` — per browser
+session, in memory only. Each user's data is fully isolated and nothing touches
+the server's disk. Session-scoped was chosen deliberately for a public demo:
+health data should be ephemeral by default.
+
+**How it would scale to real multi-user use:**
+
+- Add authentication (e.g. Streamlit Authenticator / Auth0 / Google OAuth)
+- Persist each user's history to a database keyed by user ID (Postgres + an ORM,
+  or Supabase/Firestore for a managed option)
+- Store images in object storage (S3) with per-user prefixes and signed URLs,
+  encrypted at rest
+- Add a consent flow and retention policy (auto-delete scans after N days), since
+  pet photos + health data are personal data under most privacy frameworks
+  (India's DPDP Act, GDPR)
+- Model serving would move from in-process PyTorch to a dedicated inference
+  service (TorchServe / a FastAPI + GPU container) so the Streamlit frontend
+  scales independently
+
+
+
 
 ## ⚠️ Disclaimer
 

@@ -1,0 +1,15 @@
+# PawScan AI — Streamlit configuration
+# Docs: https://docs.streamlit.io/develop/concepts/configuration
+
+[theme]
+primaryColor = "#667eea"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8f9fa"
+textColor = "#2c3e50"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+# pet photos don't need to be huge; 25 MB is plenty and keeps memory use low
+maxUploadSize = 25
