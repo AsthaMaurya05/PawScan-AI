@@ -870,7 +870,7 @@ Your scans (photos, pet details and results) are kept **only in your browser ses
         - **Framework:** PyTorch
         - **LLM:** Groq Llama 3.3 70B for care recommendations
         - **Dataset:** 4,300+ labeled pet skin disease images
-        - **Training Accuracy:** ~99% | **Validation Accuracy:** ~97%
+        - **Validation Accuracy:** 96.6% (held-out test-set report: see README → Model Performance)
 
         #### ⚠️ Important Disclaimer
         This tool is for informational purposes only and is **not a substitute for professional veterinary diagnosis**. Always consult a licensed veterinarian for health concerns about your pet.

@@ -75,11 +75,28 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
 
 ## 📊 Model Performance
 
-- **Architecture:** EfficientNet-B0 (pretrained on ImageNet, fine-tuned)
-- **Dataset:** 4,315 labeled pet skin disease images (6 classes)
-- **Training Accuracy:** ~99%
-- **Validation Accuracy:** ~97%
-- **Training:** 20 epochs on Kaggle T4 GPU
+- **Architecture:** EfficientNet-B0 (ImageNet-pretrained, fine-tuned) with a
+  Dropout→512→ReLU→Dropout→6-class head
+- **Dataset:** ~4,315 labeled pet skin-disease images (6 classes),
+  [Dog's skin diseases (Kaggle)](https://www.kaggle.com/datasets/youssefmohmmed/dogs-skin-diseases-image-dataset)
+- **Training:** up to 20 epochs on a Kaggle T4 GPU — AdamW (initial LR 1e-4,
+  cosine-decayed, weight decay 1e-4); best checkpoint selected at epoch 15
+- **Validation accuracy:** **96.63%** (stored in the released checkpoint)
+
+**Honest evaluation status:** the training-accuracy figure (~99%) is a
+training-time observation and is NOT a generalization estimate. Validation
+accuracy may be optimistic if the dataset contains multiple photos of the same
+animal on both sides of the split. To report properly, run the held-out test
+split and per-class metrics:
+
+```bash
+python src/evaluate.py --data-dir /path/to/dataset --split test --out results/
+```
+
+`src/evaluate.py` computes accuracy, per-class precision/recall/F1, macro-F1,
+weighted-F1 and a confusion matrix (saved to `results/`). Until those numbers
+are generated, treat the headline accuracy as provisional — the app is
+positioned as a preliminary assessment tool, not a diagnostic device.
 
 ## 🛠️ Tech Stack
 
@@ -140,8 +157,60 @@ health data should be ephemeral by default.
   service (TorchServe / a FastAPI + GPU container) so the Streamlit frontend
   scales independently
 
+## 🚀 How to Run Locally
 
+```bash
+# Clone the repo
+git clone https://github.com/AsthaMaurya05/PawScan-AI.git
+cd PawScan-AI
 
+# Install dependencies
+pip install -r requirements.txt
+
+# (Optional) Enable LLM care plans locally
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+# then edit .streamlit/secrets.toml and paste your Groq API key
+# (get a free one at console.groq.com — the app also works without it)
+
+# Run the app
+streamlit run app.py
+```
+
+## ☁️ Deployment (Streamlit Community Cloud)
+
+The repo is deployment-ready as-is:
+
+1. **Push to GitHub** — `models/pawscan_model.pth` (54 MB) is committed; GitHub's
+   per-file limit is 100 MB, so it fits.
+2. Go to **share.streamlit.io** → *New app* → select the repo, branch, and main
+   file `app.py`.
+3. In **Advanced settings**, add the secret `GROQ_API_KEY = "gsk_..."` (free key
+   from [console.groq.com](https://console.groq.com)). Without it the app still
+   works — it falls back to built-in care recommendations.
+4. **Deploy.** The first build takes a few minutes (PyTorch install); rebuilds are
+   cached, and every `git push` to the main branch redeploys automatically.
+5. Sanity-check after deploy: run a scan and confirm the Grad-CAM heatmap appears
+   under the photo, then open *Scan History* in a second browser/incognito window
+   and confirm it is empty (session isolation working).
+
+## 📁 Project Structure
+
+```text
+PawScan-AI/
+├── app.py                     # Streamlit web app (main entry point)
+├── src/
+│   ├── predict.py             # Inference pipeline
+│   ├── gradcam.py             # Grad-CAM explainability
+│   ├── health_score.py        # Health scoring algorithm
+│   └── llm_advisor.py         # Groq LLM integration
+├── data/
+│   └── disease_info.json      # Disease information database
+├── models/
+│   └── pawscan_model.pth      # Trained model weights
+├── class_names.json           # Class label mapping
+├── requirements.txt
+└── README.md
+```
 
 ## ⚠️ Disclaimer
 
