@@ -83,19 +83,39 @@ Built as a project for the Pawbud Health AI Engineering Intern interview.
   cosine-decayed, weight decay 1e-4); best checkpoint selected at epoch 15
 - **Validation accuracy:** **96.63%** (stored in the released checkpoint)
 
-**Honest evaluation status:** the training-accuracy figure (~99%) is a
-training-time observation and is NOT a generalization estimate. Validation
-accuracy may be optimistic if the dataset contains multiple photos of the same
-animal on both sides of the split. To report properly, run the held-out test
-split and per-class metrics:
+**Held-out test evaluation** (433 images from the dataset's `test` split — never
+used for training or checkpoint selection; computed with `src/evaluate.py`):
+
+| Metric | Value |
+|---|---|
+| Overall accuracy | **97.69%** |
+| Macro-F1 (unweighted) | **97.17%** |
+| Weighted-F1 | 97.69% |
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Dermatitis | 100.0% | 97.0% | 98.5% | 66 |
+| Fungal_infections | 94.3% | 92.6% | 93.5% | 54 |
+| Healthy | 95.7% | 97.1% | 96.4% | 69 |
+| Hypersensitivity | 96.6% | 96.6% | 96.6% | 29 |
+| demodicosis | 98.0% | 100.0% | 99.0% | 100 |
+| ringworm | 99.1% | 99.1% | 99.1% | 115 |
+
+![Confusion matrix](results/confusion_matrix_test.png)
+
+Top confusions: Healthy ↔ Fungal_infections (2 images each way),
+ringworm → demodicosis (1). The weakest class is Fungal_infections (F1 93.5%) —
+the most clinically ambiguous category.
+
+Reproduce with:
 
 ```bash
 python src/evaluate.py --data-dir /path/to/dataset --split test --out results/
 ```
 
-`src/evaluate.py` computes accuracy, per-class precision/recall/F1, macro-F1,
-weighted-F1 and a confusion matrix (saved to `results/`). Until those numbers
-are generated, treat the headline accuracy as provisional — the app is
+**Remaining honest caveats:** the split shipped with the dataset, so same-animal
+photos may straddle train/test (dataset-level leakage can't be ruled out), and
+all numbers come from a single dataset — no external validation. The app is
 positioned as a preliminary assessment tool, not a diagnostic device.
 
 ## 🛠️ Tech Stack
@@ -157,60 +177,6 @@ health data should be ephemeral by default.
   service (TorchServe / a FastAPI + GPU container) so the Streamlit frontend
   scales independently
 
-## 🚀 How to Run Locally
-
-```bash
-# Clone the repo
-git clone https://github.com/AsthaMaurya05/PawScan-AI.git
-cd PawScan-AI
-
-# Install dependencies
-pip install -r requirements.txt
-
-# (Optional) Enable LLM care plans locally
-cp .streamlit/secrets.example.toml .streamlit/secrets.toml
-# then edit .streamlit/secrets.toml and paste your Groq API key
-# (get a free one at console.groq.com — the app also works without it)
-
-# Run the app
-streamlit run app.py
-```
-
-## ☁️ Deployment (Streamlit Community Cloud)
-
-The repo is deployment-ready as-is:
-
-1. **Push to GitHub** — `models/pawscan_model.pth` (54 MB) is committed; GitHub's
-   per-file limit is 100 MB, so it fits.
-2. Go to **share.streamlit.io** → *New app* → select the repo, branch, and main
-   file `app.py`.
-3. In **Advanced settings**, add the secret `GROQ_API_KEY = "gsk_..."` (free key
-   from [console.groq.com](https://console.groq.com)). Without it the app still
-   works — it falls back to built-in care recommendations.
-4. **Deploy.** The first build takes a few minutes (PyTorch install); rebuilds are
-   cached, and every `git push` to the main branch redeploys automatically.
-5. Sanity-check after deploy: run a scan and confirm the Grad-CAM heatmap appears
-   under the photo, then open *Scan History* in a second browser/incognito window
-   and confirm it is empty (session isolation working).
-
-## 📁 Project Structure
-
-```text
-PawScan-AI/
-├── app.py                     # Streamlit web app (main entry point)
-├── src/
-│   ├── predict.py             # Inference pipeline
-│   ├── gradcam.py             # Grad-CAM explainability
-│   ├── health_score.py        # Health scoring algorithm
-│   └── llm_advisor.py         # Groq LLM integration
-├── data/
-│   └── disease_info.json      # Disease information database
-├── models/
-│   └── pawscan_model.pth      # Trained model weights
-├── class_names.json           # Class label mapping
-├── requirements.txt
-└── README.md
-```
 
 ## ⚠️ Disclaimer
 

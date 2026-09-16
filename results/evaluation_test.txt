@@ -1,0 +1,20 @@
+PawScan AI — evaluation on 'test' split (433 images)
+======================================================================
+Overall accuracy : 97.69%
+Macro-F1          : 97.17%  (unweighted per-class average)
+Weighted-F1       : 97.69%  (support-weighted)
+
+class                precision    recall        f1   support
+Dermatitis              100.0%     97.0%     98.5%        66
+Fungal_infections        94.3%     92.6%     93.5%        54
+Healthy                  95.7%     97.1%     96.4%        69
+Hypersensitivity         96.6%     96.6%     96.6%        29
+demodicosis              98.0%    100.0%     99.0%       100
+ringworm                 99.1%     99.1%     99.1%       115
+
+Top confusions (true -> predicted):
+  Healthy -> Fungal_infections: 2 images
+  Fungal_infections -> Healthy: 2 images
+  ringworm -> demodicosis: 1 images
+  Hypersensitivity -> Healthy: 1 images
+  Fungal_infections -> demodicosis: 1 images

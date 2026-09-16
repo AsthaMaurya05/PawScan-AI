@@ -1,0 +1,103 @@
+{
+  "split": "test",
+  "n_images": 433,
+  "accuracy": 0.976905311778291,
+  "macro_f1": 0.9716906999920877,
+  "weighted_f1": 0.9768586413530054,
+  "per_class": {
+    "Dermatitis": {
+      "precision": 1.0,
+      "recall": 0.9696969696969697,
+      "f1": 0.9846153846153847,
+      "support": 66
+    },
+    "Fungal_infections": {
+      "precision": 0.9433962264150944,
+      "recall": 0.9259259259259259,
+      "f1": 0.9345794392523364,
+      "support": 54
+    },
+    "Healthy": {
+      "precision": 0.9571428571428572,
+      "recall": 0.9710144927536232,
+      "f1": 0.9640287769784173,
+      "support": 69
+    },
+    "Hypersensitivity": {
+      "precision": 0.9655172413793104,
+      "recall": 0.9655172413793104,
+      "f1": 0.9655172413793104,
+      "support": 29
+    },
+    "demodicosis": {
+      "precision": 0.9803921568627451,
+      "recall": 1.0,
+      "f1": 0.99009900990099,
+      "support": 100
+    },
+    "ringworm": {
+      "precision": 0.991304347826087,
+      "recall": 0.991304347826087,
+      "f1": 0.991304347826087,
+      "support": 115
+    }
+  },
+  "confusion_matrix": [
+    [
+      64,
+      1,
+      0,
+      0,
+      0,
+      1
+    ],
+    [
+      0,
+      50,
+      2,
+      1,
+      1,
+      0
+    ],
+    [
+      0,
+      2,
+      67,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      28,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      100,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      1,
+      114
+    ]
+  ],
+  "class_order": [
+    "Dermatitis",
+    "Fungal_infections",
+    "Healthy",
+    "Hypersensitivity",
+    "demodicosis",
+    "ringworm"
+  ]
+}

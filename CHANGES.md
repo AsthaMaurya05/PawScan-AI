@@ -64,6 +64,15 @@ confusion-matrix PNG + JSON report to `results/`. Metrics are computed with
 numpy (no sklearn dependency). Folder names are matched case/separator-
 insensitively. Logic verified against hand-computed examples.
 
+### 10. Test-set results (run on Kaggle, 433 held-out images)
+- Overall accuracy **97.69%**, macro-F1 **97.17%**, weighted-F1 97.69%
+- Weakest class: Fungal_infections (F1 93.5%) — clinically the most ambiguous
+- Strongest: ringworm 99.1% F1, demodicosis 99.0% F1 (100% recall)
+- Top confusions: Healthy ↔ Fungal_infections (2+2), ringworm → demodicosis (1)
+- Confusion matrix + JSON report committed under `results/`; README and the
+  app's About page now quote these held-out numbers instead of
+  training/validation accuracy.
+
 ## Round 2 — second audit pass (found via full-UI testing)
 
 ### 5. Grad-CAM was silently failing in the real app (HIGH)
